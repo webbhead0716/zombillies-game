@@ -8,7 +8,8 @@ import {
   Dimensions,
   Platform,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
+import { startMusic } from '../../lib/sound';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -40,13 +41,12 @@ const TOMBSTONES = Array.from({ length: 10 }, (_, i) => ({
   h: 25 + (i % 4) * 12,
 }));
 
-// ── Bill (hero) render dimensions ─────────────────────────────────────────────
-const B_BODY_W = 42;
-const B_BODY_H = 72;
-const B_HEAD_D = 30;
-const B_HAT_W = 44;
-const B_HAT_H = 16;
-const B_BEARD_H = 18;
+// ── Bill (hero) render dimensions — matches the in-game sprite at 1.6× ───────
+const B_BODY_W = 48;
+const B_BODY_H = 83;
+const B_HEAD_D = 34;
+const B_HAT_W = 48;
+const B_HAT_H = 19;
 
 export default function MenuScreen() {
   const insets = useSafeAreaInsets();
@@ -61,6 +61,14 @@ export default function MenuScreen() {
 
   const topOff = insets.top + WEB_TOP;
   const botOff = insets.bottom + WEB_BOT;
+
+  // Menu music (bluegrass) whenever this screen is focused; the game screen
+  // takes over the same track seamlessly when Play is pressed.
+  useFocusEffect(
+    React.useCallback(() => {
+      startMusic('bluegrass');
+    }, [])
+  );
 
   useEffect(() => {
     AsyncStorage.getItem(HS_KEY).then(v => { if (v) setHs(parseInt(v)); });
@@ -149,39 +157,55 @@ export default function MenuScreen() {
         }]} />
       ))}
 
-      {/* ── Bill the hero ── */}
+      {/* ── Bill the hero — same look as the in-game sprite (facing left) ── */}
       <Animated.View style={[s.billWrap, { transform: [{ translateY: billBob }] }]}>
-        {/* Hat top */}
-        <View style={[s.billHatTop, { left: billCX - B_HAT_W / 2, bottom: botOff + 90 + B_BODY_H + B_HEAD_D - 8 + B_HAT_H }]} />
-        {/* Hat brim */}
-        <View style={[s.billHatBrim, { left: billCX - B_HAT_W / 2 - 7, bottom: botOff + 90 + B_BODY_H + B_HEAD_D - 8 + B_HAT_H - 6 }]} />
-        {/* Head */}
-        <View style={[s.billHead, { left: billCX - B_HEAD_D / 2, bottom: botOff + 90 + B_BODY_H - 6 }]} />
-        {/* Glasses left */}
-        <View style={[s.billGlassLeft, { left: billCX - B_HEAD_D / 2 + 1, bottom: botOff + 90 + B_BODY_H - 6 + B_HEAD_D - 17 }]} />
-        {/* Glasses right */}
-        <View style={[s.billGlassRight, { left: billCX + 4, bottom: botOff + 90 + B_BODY_H - 6 + B_HEAD_D - 17 }]} />
-        {/* Beard */}
-        <View style={[s.billBeard, { left: billCX - B_HEAD_D / 2 - 3, bottom: botOff + 90 + B_BODY_H - 6 - 2 }]} />
-        {/* Shirt body */}
-        <View style={[s.billBody, { left: billCX - B_BODY_W / 2, bottom: botOff + 90 }]} />
-        {/* Plaid stripe H */}
-        <View style={[s.plaidH, { left: billCX - B_BODY_W / 2, bottom: botOff + 90 + B_BODY_H * 0.35 }]} />
-        <View style={[s.plaidH, { left: billCX - B_BODY_W / 2, bottom: botOff + 90 + B_BODY_H * 0.65 }]} />
-        {/* Plaid stripe V */}
-        <View style={[s.plaidV, { left: billCX - B_BODY_W / 2 + B_BODY_W * 0.32, bottom: botOff + 90 }]} />
-        <View style={[s.plaidV, { left: billCX - B_BODY_W / 2 + B_BODY_W * 0.68, bottom: botOff + 90 }]} />
-        {/* Arm holding DVD */}
-        <View style={[s.billArm, { left: billCX - B_BODY_W / 2 - 30, bottom: botOff + 90 + B_BODY_H * 0.55 }]} />
-        {/* DVD */}
-        <Animated.View style={[s.dvd, {
-          left: billCX - B_BODY_W / 2 - 54,
-          bottom: botOff + 90 + B_BODY_H * 0.6,
-          transform: [{ rotate: dvdRotate }],
-        }]}>
-          <View style={s.dvdHole} />
-          <View style={s.dvdShine} />
-        </Animated.View>
+        {(() => {
+          const base = botOff + 90;                       // grass line
+          const headB = base + B_BODY_H - 10;             // head bottom
+          const capB = headB + B_HEAD_D - 6;              // cap crown bottom
+          return (
+            <>
+              {/* Boots */}
+              <View style={[s.billBoots, { left: billCX - B_BODY_W / 2 - 3, bottom: base - 3 }]} />
+              {/* Blue jeans (lower body) */}
+              <View style={[s.billJeans, { left: billCX - B_BODY_W / 2, bottom: base }]} />
+              {/* Jeans center seam */}
+              <View style={[s.billSeam, { left: billCX - 2, bottom: base }]} />
+              {/* Shirt body (upper torso) */}
+              <View style={[s.billBody, { left: billCX - B_BODY_W / 2, bottom: base + B_BODY_H * 0.48 }]} />
+              {/* Plaid stripe H */}
+              <View style={[s.plaidH, { left: billCX - B_BODY_W / 2, bottom: base + B_BODY_H * 0.66 }]} />
+              {/* Plaid stripe V */}
+              <View style={[s.plaidV, { left: billCX - B_BODY_W / 2 + B_BODY_W * 0.25, bottom: base + B_BODY_H * 0.48 }]} />
+              <View style={[s.plaidV, { left: billCX - B_BODY_W / 2 + B_BODY_W * 0.72, bottom: base + B_BODY_H * 0.48 }]} />
+              {/* Arm holding DVD */}
+              <View style={[s.billArm, { left: billCX - B_BODY_W / 2 - 30, bottom: base + B_BODY_H * 0.62 }]} />
+              {/* Head — sallow zombie green */}
+              <View style={[s.billHead, { left: billCX - B_HEAD_D / 2, bottom: headB }]} />
+              {/* Big triangular beard over the chest */}
+              <View style={[s.billBeard, { left: billCX - (B_HEAD_D / 2 + 6), bottom: headB + 11 - 46 }]} />
+              {/* Glasses — chunky dark frames + bridge */}
+              <View style={[s.billGlass, { left: billCX - B_HEAD_D / 2 + 1, bottom: headB + B_HEAD_D - 22 }]} />
+              <View style={[s.billGlass, { left: billCX + 4, bottom: headB + B_HEAD_D - 22 }]} />
+              <View style={[s.billGlassBridge, { left: billCX - 4, bottom: headB + B_HEAD_D - 19 }]} />
+              {/* Trucker cap crown */}
+              <View style={[s.billCap, { left: billCX - B_HAT_W / 2, bottom: capB }]} />
+              {/* White dot roundel — offset toward the brim side (facing left) */}
+              <View style={[s.billCapDot, { left: billCX - 16, bottom: capB + 6 }]} />
+              {/* Slim visor brim — directional, facing left */}
+              <View style={[s.billVisor, { left: billCX - B_HAT_W / 2 - 22, bottom: capB - 2 }]} />
+              {/* DVD */}
+              <Animated.View style={[s.dvd, {
+                left: billCX - B_BODY_W / 2 - 56,
+                bottom: base + B_BODY_H * 0.66,
+                transform: [{ rotate: dvdRotate }],
+              }]}>
+                <View style={s.dvdHole} />
+                <View style={s.dvdShine} />
+              </Animated.View>
+            </>
+          );
+        })()}
       </Animated.View>
 
       {/* ── Title block ── */}
@@ -238,18 +262,38 @@ const s = StyleSheet.create({
   groundGrass: { position: 'absolute', left: 0, right: 0, height: 6, backgroundColor: '#1E3A0C' },
   tombstone: { position: 'absolute', backgroundColor: '#181E18', borderWidth: 1, borderColor: '#222A22' },
 
-  // Bill
+  // Bill — colors match the in-game sprite palette
   billWrap: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
-  billHatTop: { position: 'absolute', width: B_HAT_W, height: B_HAT_H, backgroundColor: '#5C4A20', borderTopLeftRadius: 7, borderTopRightRadius: 7 },
-  billHatBrim: { position: 'absolute', width: B_HAT_W + 14, height: 6, backgroundColor: '#4A3818', borderRadius: 3 },
-  billHead: { position: 'absolute', width: B_HEAD_D, height: B_HEAD_D, borderRadius: B_HEAD_D / 2, backgroundColor: '#7AAF5A' },
-  billGlassLeft: { position: 'absolute', width: 10, height: 7, borderRadius: 3, borderWidth: 2, borderColor: '#1A1A1A', backgroundColor: 'rgba(0,0,0,0.3)' },
-  billGlassRight: { position: 'absolute', width: 10, height: 7, borderRadius: 3, borderWidth: 2, borderColor: '#1A1A1A', backgroundColor: 'rgba(0,0,0,0.3)' },
-  billBeard: { position: 'absolute', width: B_HEAD_D + 6, height: B_BEARD_H, backgroundColor: '#3A2510', borderBottomLeftRadius: 9, borderBottomRightRadius: 9 },
-  billBody: { position: 'absolute', width: B_BODY_W, height: B_BODY_H, backgroundColor: '#8B2020', borderRadius: 6 },
-  plaidH: { position: 'absolute', width: B_BODY_W, height: 5, backgroundColor: '#5A0A0A', opacity: 0.5 },
-  plaidV: { position: 'absolute', width: 4, height: B_BODY_H, backgroundColor: '#5A0A0A', opacity: 0.4 },
-  billArm: { position: 'absolute', width: 30, height: 12, backgroundColor: '#8B2020', borderRadius: 6 },
+  billCap: {
+    position: 'absolute', width: B_HAT_W, height: B_HAT_H, backgroundColor: '#3A2313',
+    borderTopLeftRadius: B_HAT_W / 2, borderTopRightRadius: B_HAT_W / 2,
+    borderBottomLeftRadius: 3, borderBottomRightRadius: 3,
+  },
+  billCapDot: { position: 'absolute', width: 9, height: 9, borderRadius: 4.5, backgroundColor: '#F2EFE6' },
+  billVisor: { position: 'absolute', width: 34, height: 5, backgroundColor: '#241206', borderRadius: 3 },
+  billHead: { position: 'absolute', width: B_HEAD_D, height: B_HEAD_D, borderRadius: B_HEAD_D / 2, backgroundColor: '#93A860' },
+  billGlass: {
+    position: 'absolute', width: 13, height: 10, borderRadius: 4,
+    borderWidth: 3, borderColor: '#1A1A1A', backgroundColor: 'rgba(40,50,20,0.6)',
+  },
+  billGlassBridge: { position: 'absolute', width: 8, height: 4, backgroundColor: '#1A1A1A' },
+  billBeard: {
+    position: 'absolute', width: 0, height: 0,
+    borderLeftWidth: B_HEAD_D / 2 + 6, borderRightWidth: B_HEAD_D / 2 + 6,
+    borderTopWidth: 46,
+    borderLeftColor: 'transparent', borderRightColor: 'transparent',
+    borderStyle: 'solid', borderTopColor: '#33200E',
+  },
+  billBody: {
+    position: 'absolute', width: B_BODY_W, height: B_BODY_H * 0.52, backgroundColor: '#8B2020',
+    borderTopLeftRadius: 8, borderTopRightRadius: 8,
+  },
+  billJeans: { position: 'absolute', width: B_BODY_W, height: B_BODY_H * 0.48, backgroundColor: '#1B65F5' },
+  billSeam: { position: 'absolute', width: 4, height: B_BODY_H * 0.38, backgroundColor: '#0F47C8', opacity: 0.8 },
+  billBoots: { position: 'absolute', width: B_BODY_W + 6, height: 9, borderRadius: 4.5, backgroundColor: '#2C1708' },
+  plaidH: { position: 'absolute', width: B_BODY_W, height: 6, backgroundColor: '#5A0A0A', opacity: 0.55 },
+  plaidV: { position: 'absolute', width: 4, height: B_BODY_H * 0.52, backgroundColor: '#5A0A0A', opacity: 0.45 },
+  billArm: { position: 'absolute', width: 30, height: 13, backgroundColor: '#8B2020', borderRadius: 6 },
   dvd: {
     position: 'absolute', width: 28, height: 28, borderRadius: 14,
     backgroundColor: '#C8C8C8', borderWidth: 3, borderColor: '#EBEBEB',

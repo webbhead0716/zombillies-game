@@ -149,7 +149,7 @@ const MIC_SPEED_MULT = 1.75;
 const HEART_HEAL = 50;           // heart power-up: restore HP
 
 // Rounds / checkpoints / boss
-const ROUND_LEN = 1200;          // world px per round; endpoint flag at the end
+const ROUND_LEN = 2600;          // world px per round; endpoint flag at the end
 const BOSS_HP_BASE = 520;
 const BOSS_HP_PER_WAVE = 45;
 const BOSS_DMG = 26;
@@ -219,7 +219,7 @@ interface Powerup {
 }
 
 interface GS {
-  phase: 'playing' | 'dead';
+  phase: 'playing' | 'intermission' | 'dead';
   wx: number;
   vy: number;
   ay: number;
@@ -242,12 +242,16 @@ interface GS {
   roundStart: number;  // world x where the current round began
   checkpointHit: boolean;
   cpMsg: number;       // "CHECKPOINT!" banner timer
+  kills: number;       // total zombies killed this run
+  hitsTaken: number;   // total hits taken this run
+  roundKills: number;  // zombies killed this round
+  roundHits: number;   // hits taken this round
+  roundScore: number;  // score at the start of this round
   nextId: number;
   score: number;
   wave: number;
   spawnQ: number;
   spawnT: number;
-  clearDelay: number;
   waveMsg: number;
 }
 
@@ -263,10 +267,11 @@ function mkGS(): GS {
     micT: 0, puCount: 0,
     powerupSpawnT: POWERUP_FIRST_SPAWN,
     roundStart: 0, checkpointHit: false, cpMsg: 0,
+    kills: 0, hitsTaken: 0, roundKills: 0, roundHits: 0, roundScore: 0,
     nextId: 0,
     score: 0, wave: 1,
     spawnQ: 3, spawnT: 1000,
-    clearDelay: 2500, waveMsg: 2500,
+    waveMsg: 2500,
   };
 }
 
@@ -293,6 +298,11 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   if (holdL) { g.wx -= spd; g.faceR = false; }
   if (holdR) { g.wx += spd; g.faceR = true; }
   if ((holdL || holdR) && g.grounded) g.step += TICK_MS;
+
+  // The endpoint flag is a wall until every zombie in the wave is dead
+  const anyAlive = g.spawnQ > 0 || g.enemies.some(e => !e.dead);
+  const endX = g.roundStart + ROUND_LEN;
+  if (anyAlive && g.wx > endX - 24) g.wx = endX - 24;
 
   // Obstacles block walking (jump over them, or hop on top).
   // Swept: resolve to the side the player came from, so a fast move can't
@@ -401,6 +411,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     if (g.micT > 0 && dist < eReach + 4) {
       e.dead = true; e.fade = 1;
       g.score += e.boss ? BOSS_SCORE : SCORE_PER_KILL;
+      g.kills++; g.roundKills++;
       g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: 'FRIED!' });
       playSfx('hit');
       keepE.push(e);
@@ -410,6 +421,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     if (e.atkCd > 0) e.atkCd -= TICK_MS;
     if (dist < eReach && e.atkCd <= 0 && g.iframeT <= 0 && g.micT <= 0) {
       g.hp -= e.boss ? BOSS_DMG : ENEMY_DMG;
+      g.hitsTaken++; g.roundHits++;
       g.iframeT = IFRAME_DUR;
       g.dmgFlash = 280;
       e.atkCd = ENEMY_ATK_CD;
@@ -427,29 +439,38 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     g.spawnT -= TICK_MS;
     if (g.spawnT <= 0) { spawnEnemy(g); g.spawnQ--; g.spawnT = 1200; }
   } else if (alive === 0) {
-    // Round ends only after clearing zombies AND reaching the endpoint flag
-    if (g.wx >= g.roundStart + ROUND_LEN) {
-      g.clearDelay -= TICK_MS;
-      if (g.clearDelay <= 0) {
-        g.wave++;
-        g.score += WAVE_BONUS;
-        g.roundStart += ROUND_LEN;
-        g.checkpointHit = false;
-        const cnt = Math.min(3 + (g.wave - 1) * 2, 14);
-        // Boss waves: a hulking boss plus a slightly thinner horde
-        if (isBossWave(g.wave)) {
-          spawnEnemy(g, true);
-          g.spawnQ = Math.max(2, cnt - 3);
-        } else {
-          g.spawnQ = cnt;
-        }
-        g.spawnT = 800;
-        g.clearDelay = 2500; g.waveMsg = 2500;
-      }
-    } else {
-      g.clearDelay = 1500; // waiting for Bill to reach the endpoint flag
+    // Zombies cleared — crossing the endpoint flag ends the round
+    if (g.wx >= g.roundStart + ROUND_LEN - 12) {
+      g.score += WAVE_BONUS;
+      g.phase = 'intermission';
+      playSfx('powerup');
     }
   }
+}
+
+/** Called from the intermission screen's NEXT WAVE button. */
+function startNextWave(g: GS) {
+  if (g.phase !== 'intermission') return; // guard against rapid double-taps
+  g.phase = 'playing';
+  g.wave++;
+  g.roundStart += ROUND_LEN;
+  g.checkpointHit = false;
+  g.roundKills = 0;
+  g.roundHits = 0;
+  g.roundScore = g.score;
+  const cnt = Math.min(3 + (g.wave - 1) * 2, 14);
+  // Boss waves: a hulking boss plus a slightly thinner horde
+  if (isBossWave(g.wave)) {
+    spawnEnemy(g, true);
+    g.spawnQ = Math.max(2, cnt - 3);
+  } else {
+    g.spawnQ = cnt;
+  }
+  g.spawnT = 800;
+  g.waveMsg = 2500;
+  g.dvds = [];
+  g.hitEffects = [];
+  g.phase = 'playing';
 }
 
 function doJump(g: GS) {
@@ -491,7 +512,7 @@ function doAttack(g: GS) {
       hitCount++;
       const hitTxt = hitCount > 1 ? 'THWACK!' : dx < range * 0.45 ? 'THWACK!' : 'WHIZZZ!';
       g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: hitTxt });
-      if (e.hp <= 0) { e.dead = true; e.fade = 1; g.score += e.boss ? BOSS_SCORE : SCORE_PER_KILL; }
+      if (e.hp <= 0) { e.dead = true; e.fade = 1; g.score += e.boss ? BOSS_SCORE : SCORE_PER_KILL; g.kills++; g.roundKills++; }
     }
   }
   if (hitCount > 0) playSfx('hit');
@@ -1444,6 +1465,49 @@ export default function GameScreen() {
         </View>
       )}
 
+      {/* ── Round-complete intermission ── */}
+      {g.phase === 'intermission' && (
+        <View style={[StyleSheet.absoluteFill, st.interWrap]}>
+          <View style={st.interCard}>
+            <Text style={st.interTitle}>WAVE {g.wave} CLEARED!</Text>
+            {isBossWave(g.wave) && <Text style={st.interBoss}>BOSS DEFEATED</Text>}
+            <View style={st.interDivider} />
+            <View style={st.interRow}>
+              <Text style={st.interLabel}>SCORE</Text>
+              <Text style={st.interVal}>{g.score.toLocaleString()}</Text>
+            </View>
+            <View style={st.interRow}>
+              <Text style={st.interLabel}>ROUND POINTS</Text>
+              <Text style={st.interVal}>+{(g.score - g.roundScore).toLocaleString()}</Text>
+            </View>
+            <View style={st.interRow}>
+              <Text style={st.interLabel}>ZOMBIES KILLED</Text>
+              <Text style={st.interVal}>{g.roundKills}  <Text style={st.interDim}>({g.kills} total)</Text></Text>
+            </View>
+            <View style={st.interRow}>
+              <Text style={st.interLabel}>HITS TAKEN</Text>
+              <Text style={st.interVal}>{g.roundHits}  <Text style={st.interDim}>({g.hitsTaken} total)</Text></Text>
+            </View>
+            <View style={st.interRow}>
+              <Text style={st.interLabel}>HEALTH</Text>
+              <Text style={st.interVal}>{g.hp} / {PLAYER_MAX_HP}</Text>
+            </View>
+            <Pressable
+              style={({ pressed }) => [st.interBtn, pressed && st.interBtnPressed]}
+              onPress={() => {
+                startNextWave(gsRef.current);
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              }}
+            >
+              <Ionicons name="play" size={18} color="#FFF" />
+              <Text style={st.interBtnTxt}>
+                {isBossWave(g.wave + 1) ? 'NEXT WAVE — BOSS FIGHT!' : `START WAVE ${g.wave + 1}`}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
       {/* ── Controls ── */}
       <View style={[st.controls, { bottom: botOff, height: CTRL_H }]}>
         <View style={st.dpad}>
@@ -1572,6 +1636,43 @@ const st = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   dvdIconHole: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: '#505050' },
+  // Intermission (round complete)
+  interWrap: {
+    backgroundColor: 'rgba(3,2,8,0.82)',
+    alignItems: 'center', justifyContent: 'center', zIndex: 40,
+  },
+  interCard: {
+    width: Math.min(SW - 44, 360),
+    backgroundColor: 'rgba(10,7,16,0.97)',
+    borderWidth: 1.5, borderColor: '#3A2A0A',
+    borderRadius: 18, paddingHorizontal: 24, paddingVertical: 22,
+  },
+  interTitle: {
+    color: C.gold, fontSize: 26, fontWeight: '900', letterSpacing: 2,
+    textAlign: 'center',
+    textShadowColor: C.blood, textShadowRadius: 10, textShadowOffset: { width: 0, height: 2 },
+  },
+  interBoss: {
+    color: '#FF4D4D', fontSize: 12, fontWeight: '900', letterSpacing: 4,
+    textAlign: 'center', marginTop: 2,
+  },
+  interDivider: { height: 1, backgroundColor: '#3A2A0A', marginVertical: 14 },
+  interRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingVertical: 5,
+  },
+  interLabel: { color: '#8A7040', fontSize: 11, fontWeight: '700', letterSpacing: 1.5 },
+  interVal: { color: C.white, fontSize: 15, fontWeight: '900' },
+  interDim: { color: '#6A6A6A', fontSize: 11, fontWeight: '600' },
+  interBtn: {
+    marginTop: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, backgroundColor: '#CC2200', borderRadius: 40,
+    paddingVertical: 14,
+    shadowColor: '#CC2200', shadowRadius: 14, shadowOpacity: 0.55,
+    shadowOffset: { width: 0, height: 0 }, elevation: 10,
+  },
+  interBtnPressed: { backgroundColor: '#A01600' },
+  interBtnTxt: { color: '#FFF', fontSize: 15, fontWeight: '900', letterSpacing: 2 },
   btnPuIcon: {
     position: 'absolute', top: -2, right: -2,
     backgroundColor: 'rgba(0,0,0,0.7)',
