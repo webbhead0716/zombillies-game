@@ -23,21 +23,23 @@ const C = {
   ground: '#1A0A00',
   groundTop: '#2A1A04',
   treeCol: '#06080A',
-  // Bill
-  billCap: '#5C4A20',
-  billCapBrim: '#4A3818',
-  billHead: '#7AAF5A',
-  billBeard: '#3A2510',
+  // Bill — comic look: black trucker cap w/ white roundel, sallow green skin
+  billCap: '#1C1B20',
+  billCapBrim: '#0E0D12',
+  billHead: '#93A860',
+  billBeard: '#2E2418',
   billShirt: '#8B2020',
   billShirtDark: '#5A0A0A',
   billGlasses: '#1A1A1A',
   // Enemies
-  zombie0Body: '#556644',
-  zombie0Head: '#6A9050',
-  zombie1Body: '#5A5040',
-  zombie1Head: '#78706A',
-  zombie2Body: '#4A6030',
-  zombie2Head: '#648048',
+  zombie0Body: '#3E5A8A',   // torn blue "karaoke" tee
+  zombie0Head: '#7FA84E',
+  zombie1Body: '#5A4A38',   // overalls brown
+  zombie1Head: '#8A9468',
+  zombie2Body: '#3E6030',   // green "BITE ME" tee
+  zombie2Head: '#6E9A44',
+  cityCol: '#15101C',
+  cityWindow: '#8A4A16',
   // UI
   blood: '#CC2200',
   dvdSilver: '#C8C8C8',
@@ -114,7 +116,6 @@ const SPAWN_DIST = SW + 130;
 const HS_KEY = 'zb_hs';
 
 // Power-ups
-const POWERUP_DURATION = 10000;  // 10 s
 const POWERUP_PICKUP_R = 38;     // pickup radius (world px)
 const POWERUP_FIRST_SPAWN = 10000;
 const POWERUP_RESPAWN = 18000;
@@ -172,7 +173,6 @@ interface GS {
   hitEffects: HitEffect[];
   powerups: Powerup[];
   activePowerup: 'ketchup' | 'chili' | null;
-  powerupT: number;
   powerupSpawnT: number;
   nextId: number;
   score: number;
@@ -191,7 +191,7 @@ function mkGS(): GS {
     hp: PLAYER_MAX_HP,
     atkActive: false, atkT: 0, iframeT: 0, dmgFlash: 0, step: 0,
     enemies: [], dvds: [], hitEffects: [],
-    powerups: [], activePowerup: null, powerupT: 0,
+    powerups: [], activePowerup: null,
     powerupSpawnT: POWERUP_FIRST_SPAWN,
     nextId: 0,
     score: 0, wave: 1,
@@ -233,8 +233,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   if (g.dmgFlash > 0) g.dmgFlash -= TICK_MS;
   if (g.waveMsg > 0) g.waveMsg -= TICK_MS;
 
-  // Active power-up countdown
-  if (g.powerupT > 0) { g.powerupT -= TICK_MS; if (g.powerupT <= 0) g.activePowerup = null; }
+  // Power-ups persist until Bill takes damage (cleared in enemy attack block)
 
   // Power-up spawn
   g.powerupSpawnT -= TICK_MS;
@@ -257,7 +256,6 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     if (Math.abs(p.wx - g.wx) < POWERUP_PICKUP_R && g.ay < 10) {
       // Picked up
       g.activePowerup = p.type;
-      g.powerupT = POWERUP_DURATION;
       playSfx('powerup');
     } else {
       remaining.push(p);
@@ -289,6 +287,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
       g.iframeT = IFRAME_DUR;
       g.dmgFlash = 280;
       e.atkCd = ENEMY_ATK_CD;
+      g.activePowerup = null; // losing the power-up is the price of getting hit
       if (g.hp <= 0) { g.hp = 0; g.phase = 'dead'; playSfx('gameover'); return; }
       playSfx('hurt');
     }
@@ -372,10 +371,18 @@ const STARS = Array.from({ length: 45 }, (_, i) => ({
 }));
 
 const ENEMY_COLS = [
-  { body: C.zombie0Body, head: C.zombie0Head, shirt: '#3A4C30' },
-  { body: C.zombie1Body, head: C.zombie1Head, shirt: '#443830' },
-  { body: C.zombie2Body, head: C.zombie2Head, shirt: '#2A3820' },
+  { body: C.zombie0Body, head: C.zombie0Head, shirt: '#3A4C30', pants: '#2E2A26' },
+  { body: C.zombie1Body, head: C.zombie1Head, shirt: '#443830', pants: '#3A4A5A' },
+  { body: C.zombie2Body, head: C.zombie2Head, shirt: '#2A3820', pants: '#2A2018' },
 ] as const;
+
+// Ruined city silhouette (far parallax layer, like the comic backdrops)
+const CITY = Array.from({ length: 30 }, (_, i) => ({
+  wx: (i - 15) * 250 + (i % 5) * 55,
+  h: 62 + (i % 6) * 24,
+  w: 36 + (i % 4) * 16,
+  broken: i % 3 === 0, // jagged / collapsed top
+}));
 
 // Powerup icons (drawn with View shapes)
 function KetchupIcon({ size = 1, opacity = 1 }: { size?: number; opacity?: number }) {
@@ -494,8 +501,6 @@ export default function GameScreen() {
     return sx > -90 && sx < SW + 90;
   });
 
-  // Power-up timer fraction
-  const puFrac = g.activePowerup ? g.powerupT / POWERUP_DURATION : 0;
   const isKetchupActive = g.activePowerup === 'ketchup';
   const isChiliActive = g.activePowerup === 'chili';
 
@@ -524,6 +529,37 @@ export default function GameScreen() {
           }} />
         ))}
         <View style={[st.moon, { top: topOff + HUD_H + 18, right: 55 }]} />
+        {/* Sunset horizon glow — burnt orange bands like the comic panels */}
+        <View style={{ position: 'absolute', left: 0, right: 0, bottom: GROUND_H, height: 100, backgroundColor: '#6A2C10', opacity: 0.18 }} />
+        <View style={{ position: 'absolute', left: 0, right: 0, bottom: GROUND_H, height: 58, backgroundColor: '#93401A', opacity: 0.20 }} />
+        <View style={{ position: 'absolute', left: 0, right: 0, bottom: GROUND_H, height: 26, backgroundColor: '#C05A18', opacity: 0.18 }} />
+        {/* Ruined city skyline (far parallax) */}
+        {CITY.map((b, i) => {
+          const sx = SW / 2 + (b.wx - g.wx) * 0.22 - b.w / 2;
+          if (sx < -100 || sx > SW + 100) return null;
+          return (
+            <View key={`c${i}`} style={{ position: 'absolute', left: sx, bottom: GROUND_H - 2, width: b.w, height: b.h }}>
+              <View style={{
+                position: 'absolute', left: 0, bottom: 0, width: b.w, height: b.h,
+                backgroundColor: C.cityCol,
+                borderTopLeftRadius: b.broken ? 0 : 2,
+                borderTopRightRadius: b.broken ? 10 : 2,
+              }} />
+              {b.broken && (
+                <View style={{
+                  position: 'absolute', left: b.w * 0.55, bottom: b.h - 8, width: b.w * 0.45, height: 8,
+                  backgroundColor: C.skyTop,
+                }} />
+              )}
+              {/* Dim lit windows */}
+              <View style={{ position: 'absolute', left: 5, bottom: b.h * 0.55, width: 3, height: 4, backgroundColor: C.cityWindow, opacity: 0.65 }} />
+              <View style={{ position: 'absolute', left: b.w - 9, bottom: b.h * 0.3, width: 3, height: 4, backgroundColor: C.cityWindow, opacity: 0.5 }} />
+              {i % 2 === 0 && (
+                <View style={{ position: 'absolute', left: b.w * 0.4, bottom: b.h * 0.72, width: 3, height: 4, backgroundColor: C.cityWindow, opacity: 0.55 }} />
+              )}
+            </View>
+          );
+        })}
         <View style={[st.hill, { bottom: GROUND_H, left: -20, width: SW * 0.55, height: 70 }]} />
         <View style={[st.hill, { bottom: GROUND_H, left: SW * 0.38, width: SW * 0.65, height: 50 }]} />
         {visTrees.map((t, i) => {
@@ -626,12 +662,37 @@ export default function GameScreen() {
               opacity: e.dead ? e.fade : 1,
             }} />
             {!e.dead && (
-              <View style={{
-                position: 'absolute',
-                left: faceR ? eHdX + 4 : eHdX + ENEMY_HEAD_D - 9,
-                top: eHdY + 6 + eBob,
-                width: 5, height: 4, borderRadius: 2, backgroundColor: '#EEEEDD',
-              }} />
+              <>
+                {/* Bulging comic eyes */}
+                <View style={{
+                  position: 'absolute', left: eHdX + 2.5, top: eHdY + 5 + eBob,
+                  width: 6.5, height: 6.5, borderRadius: 3.25, backgroundColor: '#F2EFE0',
+                }} />
+                <View style={{
+                  position: 'absolute', left: eHdX + ENEMY_HEAD_D - 9, top: eHdY + 5 + eBob,
+                  width: 6.5, height: 6.5, borderRadius: 3.25, backgroundColor: '#F2EFE0',
+                }} />
+                <View style={{
+                  position: 'absolute', left: faceR ? eHdX + 6 : eHdX + 3.5,
+                  top: eHdY + 7 + eBob,
+                  width: 2.5, height: 2.5, borderRadius: 1.25, backgroundColor: '#131313',
+                }} />
+                <View style={{
+                  position: 'absolute', left: faceR ? eHdX + ENEMY_HEAD_D - 5.5 : eHdX + ENEMY_HEAD_D - 8,
+                  top: eHdY + 7 + eBob,
+                  width: 2.5, height: 2.5, borderRadius: 1.25, backgroundColor: '#131313',
+                }} />
+                {/* Gaping mouth */}
+                <View style={{
+                  position: 'absolute', left: eHdX + 6, top: eHdY + 13.5 + eBob,
+                  width: 7, height: 4, borderRadius: 2, backgroundColor: '#2A1210',
+                }} />
+                {/* Head gash */}
+                <View style={{
+                  position: 'absolute', left: eHdX + (faceR ? 12 : 3), top: eHdY + 1 + eBob,
+                  width: 5, height: 3, borderRadius: 1.5, backgroundColor: '#8B2010',
+                }} />
+              </>
             )}
             <View style={{
               position: 'absolute', left: ebx, top: eTopY + eBob,
@@ -639,6 +700,28 @@ export default function GameScreen() {
               backgroundColor: ec.body, borderRadius: 4,
               opacity: e.dead ? e.fade : 1,
             }} />
+            {/* Ragged pants */}
+            <View style={{
+              position: 'absolute', left: ebx + 1, top: eTopY + ENEMY_H * 0.6 + eBob,
+              width: ENEMY_W - 2, height: ENEMY_H * 0.4,
+              backgroundColor: ec.pants,
+              borderBottomLeftRadius: 4, borderBottomRightRadius: 4,
+              opacity: e.dead ? e.fade : 1,
+            }} />
+            {/* Torn shirt hem */}
+            <View style={{
+              position: 'absolute', left: ebx, top: eTopY + ENEMY_H * 0.58 + eBob,
+              width: ENEMY_W, height: 2.5,
+              backgroundColor: 'rgba(0,0,0,0.4)',
+              opacity: e.dead ? e.fade : 1,
+            }} />
+            {/* Shirt stain / blood splatter */}
+            {!e.dead && (
+              <View style={{
+                position: 'absolute', left: ebx + (e.etype === 1 ? 4 : ENEMY_W - 11), top: eTopY + 10 + eBob,
+                width: 7, height: 6, borderRadius: 3, backgroundColor: '#6B1408', opacity: 0.75,
+              }} />
+            )}
             {!e.dead && (
               <View style={{
                 position: 'absolute', left: armX, top: eTopY + 12 + eBob,
@@ -745,17 +828,22 @@ export default function GameScreen() {
           left: g.faceR ? pHatX : pHatX + HAT_W / 2,
           top: pHatTopY + pBob,
           width: HAT_W / 2, height: HAT_H,
-          backgroundColor: '#4A3A18',
+          backgroundColor: '#34333C',
           borderTopLeftRadius: g.faceR ? 0 : 11,
           borderTopRightRadius: g.faceR ? 11 : 0,
           borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
           opacity: pOpacity * 0.55,
         }} />
-        {/* Logo patch */}
+        {/* Logo patch — white roundel like the comic cap */}
         <View style={{
-          position: 'absolute', left: pCX - 5, top: pHatTopY + 3 + pBob,
-          width: 10, height: 6, borderRadius: 2,
-          backgroundColor: '#8B1A00', opacity: pOpacity * 0.9,
+          position: 'absolute', left: pCX - 4.5, top: pHatTopY + 2.5 + pBob,
+          width: 9, height: 9, borderRadius: 4.5,
+          backgroundColor: '#E8E4D8', opacity: pOpacity,
+        }} />
+        <View style={{
+          position: 'absolute', left: pCX - 2, top: pHatTopY + 5 + pBob,
+          width: 4, height: 4, borderRadius: 2,
+          backgroundColor: '#8B1A00', opacity: pOpacity,
         }} />
         {/* Button on top */}
         <View style={{
@@ -870,11 +958,11 @@ export default function GameScreen() {
           {g.activePowerup && (
             <View style={st.puBar}>
               <View style={[st.puBarFill, {
-                width: `${puFrac * 100}%`,
+                width: '100%',
                 backgroundColor: isKetchupActive ? '#FF4422' : '#FF9900',
               }]} />
               <Text style={[st.puLabel, { color: isKetchupActive ? '#FF8866' : '#FFBB44' }]}>
-                {isKetchupActive ? 'KETCHUP SPREAD' : 'CHILI RAPID FIRE'}
+                {isKetchupActive ? 'KETCHUP SPREAD · UNTIL HIT' : 'CHILI RAPID FIRE · UNTIL HIT'}
               </Text>
             </View>
           )}
