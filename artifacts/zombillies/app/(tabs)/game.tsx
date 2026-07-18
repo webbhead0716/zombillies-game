@@ -85,6 +85,14 @@ const C = {
   barricadeB: '#3A3230',
   platformCol: '#3A3028',
   platformTop: '#5C4A34',
+  // Heart / checkpoints / boss
+  heart: '#FF3B5C',
+  heartDark: '#C41E3E',
+  cpFlag: '#35D07F',
+  endFlagA: '#F2EFE6',
+  endFlagB: '#1A1A1A',
+  bossBody: '#4A1A2A',
+  bossHead: '#5E7A34',
 };
 
 // ── Layout ────────────────────────────────────────────────────────────────────
@@ -138,6 +146,17 @@ const POWERUP_FIRST_SPAWN = 10000;
 const POWERUP_RESPAWN = 18000;
 const MIC_DURATION = 30000;      // mic mode: timed invincibility + speed
 const MIC_SPEED_MULT = 1.75;
+const HEART_HEAL = 50;           // heart power-up: restore HP
+
+// Rounds / checkpoints / boss
+const ROUND_LEN = 1200;          // world px per round; endpoint flag at the end
+const BOSS_HP_BASE = 520;
+const BOSS_HP_PER_WAVE = 45;
+const BOSS_DMG = 26;
+const BOSS_SPD = 1.35;
+const BOSS_SCALE = 1.65;
+const BOSS_SCORE = 1000;
+const isBossWave = (w: number) => w > 1 && w % 3 === 0;
 
 // ── Platforms & obstacles (world space) ──────────────────────────────────────
 interface Solid { wx: number; w: number; h: number; kind: 'car' | 'crate' | 'barricade' | 'platform'; }
@@ -174,6 +193,7 @@ interface Enemy {
   dead: boolean;
   fade: number;
   step: number;
+  boss: boolean;
 }
 
 interface DVDProj {
@@ -193,7 +213,7 @@ interface HitEffect {
 
 interface Powerup {
   id: string;
-  type: 'ketchup' | 'chili' | 'mic';
+  type: 'ketchup' | 'chili' | 'mic' | 'heart';
   wx: number;
   bobT: number;  // for idle float animation
 }
@@ -219,6 +239,9 @@ interface GS {
   micT: number;        // timed mic mode: invincible + fast
   puCount: number;     // rotates powerup spawn types
   powerupSpawnT: number;
+  roundStart: number;  // world x where the current round began
+  checkpointHit: boolean;
+  cpMsg: number;       // "CHECKPOINT!" banner timer
   nextId: number;
   score: number;
   wave: number;
@@ -239,6 +262,7 @@ function mkGS(): GS {
     powerups: [], activePowerup: null,
     micT: 0, puCount: 0,
     powerupSpawnT: POWERUP_FIRST_SPAWN,
+    roundStart: 0, checkpointHit: false, cpMsg: 0,
     nextId: 0,
     score: 0, wave: 1,
     spawnQ: 3, spawnT: 1000,
@@ -246,16 +270,17 @@ function mkGS(): GS {
   };
 }
 
-function spawnEnemy(g: GS) {
+function spawnEnemy(g: GS, boss = false) {
   const side = g.nextId % 2 === 0 ? 1 : -1;
   g.nextId++;
   const jitter = (g.nextId % 5) * 40;
   const etype = (g.nextId % 3) as 0 | 1 | 2;
+  const hp = boss ? BOSS_HP_BASE + g.wave * BOSS_HP_PER_WAVE : ENEMY_MAX_HP;
   g.enemies.push({
     id: `e${g.nextId}`, etype,
     wx: g.wx + side * (SPAWN_DIST + jitter),
-    hp: ENEMY_MAX_HP, maxHp: ENEMY_MAX_HP,
-    atkCd: 600, dead: false, fade: 1, step: 0,
+    hp, maxHp: hp,
+    atkCd: 600, dead: false, fade: 1, step: 0, boss,
   });
 }
 
@@ -297,9 +322,19 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   if (g.iframeT > 0) g.iframeT -= TICK_MS;
   if (g.dmgFlash > 0) g.dmgFlash -= TICK_MS;
   if (g.waveMsg > 0) g.waveMsg -= TICK_MS;
+  if (g.cpMsg > 0) g.cpMsg -= TICK_MS;
   if (g.micT > 0) {
     g.micT -= TICK_MS;
     if (g.micT <= 0) { g.micT = 0; switchMusic('bluegrass'); }
+  }
+
+  // Midway checkpoint — crossing it restores full health (once per round)
+  if (!g.checkpointHit && g.wx >= g.roundStart + ROUND_LEN / 2) {
+    g.checkpointHit = true;
+    g.hp = PLAYER_MAX_HP;
+    g.dmgFlash = 0;
+    g.cpMsg = 2200;
+    playSfx('powerup');
   }
 
   // Power-ups persist until Bill takes damage (cleared in enemy attack block)
@@ -308,8 +343,8 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   g.powerupSpawnT -= TICK_MS;
   if (g.powerupSpawnT <= 0 && g.powerups.length < 2) {
     const side = g.nextId % 2 === 0 ? 1 : -1;
-    // Rotate ketchup → chili → mic
-    const type = (['ketchup', 'chili', 'mic'] as const)[g.puCount % 3];
+    // Rotate ketchup → chili → mic → heart
+    const type = (['ketchup', 'chili', 'mic', 'heart'] as const)[g.puCount % 4];
     g.puCount++;
     g.powerups.push({
       id: `pu${++g.nextId}`, type,
@@ -328,6 +363,10 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
       if (p.type === 'mic') {
         g.micT = MIC_DURATION;
         switchMusic('rockabilly');
+      } else if (p.type === 'heart') {
+        g.hp = Math.min(PLAYER_MAX_HP, g.hp + HEART_HEAL);
+        g.dmgFlash = 0;
+        g.iframeT = Math.max(g.iframeT, 400);
       } else {
         g.activePowerup = p.type;
       }
@@ -354,11 +393,23 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     const dir = dx >= 0 ? 1 : -1;
     const dist = Math.abs(dx);
 
-    if (dist > ENEMY_ATK_RANGE - 4) { e.wx += dir * ENEMY_SPD; e.step += TICK_MS; }
+    const eSpd = e.boss ? BOSS_SPD : ENEMY_SPD;
+    const eReach = e.boss ? ENEMY_ATK_RANGE + 16 : ENEMY_ATK_RANGE;
+    if (dist > eReach - 4) { e.wx += dir * eSpd; e.step += TICK_MS; }
+
+    // Mic mode: any zombie that touches Bill gets fried instantly
+    if (g.micT > 0 && dist < eReach + 4) {
+      e.dead = true; e.fade = 1;
+      g.score += e.boss ? BOSS_SCORE : SCORE_PER_KILL;
+      g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: 'FRIED!' });
+      playSfx('hit');
+      keepE.push(e);
+      continue;
+    }
 
     if (e.atkCd > 0) e.atkCd -= TICK_MS;
-    if (dist < ENEMY_ATK_RANGE && e.atkCd <= 0 && g.iframeT <= 0 && g.micT <= 0) {
-      g.hp -= ENEMY_DMG;
+    if (dist < eReach && e.atkCd <= 0 && g.iframeT <= 0 && g.micT <= 0) {
+      g.hp -= e.boss ? BOSS_DMG : ENEMY_DMG;
       g.iframeT = IFRAME_DUR;
       g.dmgFlash = 280;
       e.atkCd = ENEMY_ATK_CD;
@@ -376,13 +427,27 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     g.spawnT -= TICK_MS;
     if (g.spawnT <= 0) { spawnEnemy(g); g.spawnQ--; g.spawnT = 1200; }
   } else if (alive === 0) {
-    g.clearDelay -= TICK_MS;
-    if (g.clearDelay <= 0) {
-      g.wave++;
-      g.score += WAVE_BONUS;
-      const cnt = Math.min(3 + (g.wave - 1) * 2, 14);
-      g.spawnQ = cnt; g.spawnT = 800;
-      g.clearDelay = 2500; g.waveMsg = 2500;
+    // Round ends only after clearing zombies AND reaching the endpoint flag
+    if (g.wx >= g.roundStart + ROUND_LEN) {
+      g.clearDelay -= TICK_MS;
+      if (g.clearDelay <= 0) {
+        g.wave++;
+        g.score += WAVE_BONUS;
+        g.roundStart += ROUND_LEN;
+        g.checkpointHit = false;
+        const cnt = Math.min(3 + (g.wave - 1) * 2, 14);
+        // Boss waves: a hulking boss plus a slightly thinner horde
+        if (isBossWave(g.wave)) {
+          spawnEnemy(g, true);
+          g.spawnQ = Math.max(2, cnt - 3);
+        } else {
+          g.spawnQ = cnt;
+        }
+        g.spawnT = 800;
+        g.clearDelay = 2500; g.waveMsg = 2500;
+      }
+    } else {
+      g.clearDelay = 1500; // waiting for Bill to reach the endpoint flag
     }
   }
 }
@@ -426,7 +491,7 @@ function doAttack(g: GS) {
       hitCount++;
       const hitTxt = hitCount > 1 ? 'THWACK!' : dx < range * 0.45 ? 'THWACK!' : 'WHIZZZ!';
       g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: hitTxt });
-      if (e.hp <= 0) { e.dead = true; e.fade = 1; g.score += SCORE_PER_KILL; }
+      if (e.hp <= 0) { e.dead = true; e.fade = 1; g.score += e.boss ? BOSS_SCORE : SCORE_PER_KILL; }
     }
   }
   if (hitCount > 0) playSfx('hit');
@@ -535,6 +600,34 @@ function MicIcon({ size = 1, opacity = 1 }: { size?: number; opacity?: number })
       <View style={{
         width: 7 * s, height: 15 * s, backgroundColor: C.micHandle,
         borderBottomLeftRadius: 3 * s, borderBottomRightRadius: 3 * s,
+      }} />
+    </View>
+  );
+}
+
+function HeartIcon({ size = 1, opacity = 1 }: { size?: number; opacity?: number }) {
+  const s = size;
+  return (
+    <View style={{ width: 30 * s, height: 30 * s, alignItems: 'center', opacity }}>
+      {/* Two lobes */}
+      <View style={{ flexDirection: 'row' }}>
+        <View style={{ width: 14 * s, height: 14 * s, borderRadius: 7 * s, backgroundColor: C.heart, marginRight: -3 * s }} />
+        <View style={{ width: 14 * s, height: 14 * s, borderRadius: 7 * s, backgroundColor: C.heart }} />
+      </View>
+      {/* Point */}
+      <View style={{
+        width: 0, height: 0, marginTop: -7 * s,
+        borderLeftWidth: 12.5 * s, borderRightWidth: 12.5 * s,
+        borderTopWidth: 14 * s,
+        borderLeftColor: 'transparent', borderRightColor: 'transparent',
+        borderStyle: 'solid',
+        borderTopColor: C.heart,
+      }} />
+      {/* Shine */}
+      <View style={{
+        position: 'absolute', left: 5 * s, top: 3.5 * s,
+        width: 5 * s, height: 3.5 * s, borderRadius: 2 * s,
+        backgroundColor: '#FF8FA5', opacity: 0.85,
       }} />
     </View>
   );
@@ -846,6 +939,55 @@ export default function GameScreen() {
         );
       })}
 
+      {/* ── Checkpoint & round endpoint flags ── */}
+      {[
+        { wx: g.roundStart + ROUND_LEN / 2, end: false },
+        { wx: g.roundStart + ROUND_LEN, end: true },
+      ].map((f, i) => {
+        const sx = SW / 2 + (f.wx - g.wx);
+        if (sx < -80 || sx > SW + 80) return null;
+        const poleH = f.end ? 86 : 68;
+        const hit = !f.end && g.checkpointHit;
+        const flagCol = f.end ? C.endFlagA : hit ? C.micGold : C.cpFlag;
+        return (
+          <View key={`fl${i}`} pointerEvents="none" style={StyleSheet.absoluteFill}>
+            {/* Pole */}
+            <View style={{
+              position: 'absolute', left: sx - 2, top: groundY - poleH,
+              width: 4, height: poleH, backgroundColor: '#8A8A94', borderRadius: 2,
+            }} />
+            {/* Flag */}
+            <View style={{
+              position: 'absolute', left: sx + 2, top: groundY - poleH + 2,
+              width: 42, height: 22, backgroundColor: flagCol,
+              borderTopRightRadius: 3, borderBottomRightRadius: 3,
+              alignItems: 'center', justifyContent: 'center',
+              opacity: hit ? 0.85 : 1,
+            }}>
+              {f.end && (
+                <>
+                  {/* Checkered squares */}
+                  <View style={{ position: 'absolute', left: 0, top: 0, width: 10, height: 11, backgroundColor: C.endFlagB }} />
+                  <View style={{ position: 'absolute', left: 21, top: 0, width: 10, height: 11, backgroundColor: C.endFlagB }} />
+                  <View style={{ position: 'absolute', left: 10, top: 11, width: 11, height: 11, backgroundColor: C.endFlagB }} />
+                  <View style={{ position: 'absolute', left: 32, top: 11, width: 10, height: 11, backgroundColor: C.endFlagB }} />
+                </>
+              )}
+              {!f.end && (
+                <Text style={{ color: '#04240F', fontSize: 8, fontWeight: '900', letterSpacing: 0.5 }}>
+                  {hit ? '✓' : 'CP'}
+                </Text>
+              )}
+            </View>
+            {/* Base */}
+            <View style={{
+              position: 'absolute', left: sx - 7, top: groundY - 4,
+              width: 14, height: 5, borderRadius: 2, backgroundColor: '#3A3A42',
+            }} />
+          </View>
+        );
+      })}
+
       {/* ── Power-ups on ground ── */}
       {g.powerups.map(p => {
         const sx = SW / 2 + (p.wx - g.wx);
@@ -861,22 +1003,29 @@ export default function GameScreen() {
               width: p.type === 'chili' ? 48 : 34,
               height: p.type === 'chili' ? 38 : 46,
               borderRadius: 10,
-              backgroundColor: p.type === 'ketchup' ? 'rgba(200,30,0,0.18)' : p.type === 'chili' ? 'rgba(180,80,0,0.18)' : 'rgba(255,210,74,0.16)',
+              backgroundColor:
+                p.type === 'ketchup' ? 'rgba(200,30,0,0.18)'
+                : p.type === 'chili' ? 'rgba(180,80,0,0.18)'
+                : p.type === 'heart' ? 'rgba(255,59,92,0.18)'
+                : 'rgba(255,210,74,0.16)',
               borderWidth: 1.5,
-              borderColor: p.type === 'ketchup' ? 'rgba(255,80,0,0.45)' : p.type === 'chili' ? 'rgba(255,140,0,0.45)' : 'rgba(255,210,74,0.6)',
+              borderColor:
+                p.type === 'ketchup' ? 'rgba(255,80,0,0.45)'
+                : p.type === 'chili' ? 'rgba(255,140,0,0.45)'
+                : p.type === 'heart' ? 'rgba(255,59,92,0.55)'
+                : 'rgba(255,210,74,0.6)',
             }} />
-            {p.type === 'ketchup'
-              ? <KetchupIcon size={1} />
-              : p.type === 'chili'
-              ? <ChiliBowlIcon size={1} />
+            {p.type === 'ketchup' ? <KetchupIcon size={1} />
+              : p.type === 'chili' ? <ChiliBowlIcon size={1} />
+              : p.type === 'heart' ? <HeartIcon size={1} />
               : <MicIcon size={1} />
             }
             <Text style={{
-              color: p.type === 'ketchup' ? '#FF8060' : p.type === 'chili' ? '#FFAA40' : C.micGold,
+              color: p.type === 'ketchup' ? '#FF8060' : p.type === 'chili' ? '#FFAA40' : p.type === 'heart' ? '#FF7A90' : C.micGold,
               fontSize: 8, fontWeight: '900', letterSpacing: 1,
               textAlign: 'center', marginTop: 2,
             }}>
-              {p.type === 'ketchup' ? 'SPREAD' : p.type === 'chili' ? 'RAPID' : 'MIC!'}
+              {p.type === 'ketchup' ? 'SPREAD' : p.type === 'chili' ? 'RAPID' : p.type === 'heart' ? '+LIFE' : 'MIC!'}
             </Text>
           </View>
         );
@@ -904,104 +1053,125 @@ export default function GameScreen() {
 
       {/* ── Enemies ── */}
       {g.enemies.map(e => {
+        const sc = e.boss ? BOSS_SCALE : 1;
+        const eW = ENEMY_W * sc;
+        const eH = ENEMY_H * sc;
+        const eHD = ENEMY_HEAD_D * sc;
         const ecx = SW / 2 + (e.wx - g.wx);
-        const ebx = ecx - ENEMY_W / 2;
-        const eTopY = groundY - ENEMY_H;
-        const eHdX = ecx - ENEMY_HEAD_D / 2;
-        const eHdY = eTopY - ENEMY_HEAD_D + 5;
+        const ebx = ecx - eW / 2;
+        const eTopY = groundY - eH;
+        const eHdX = ecx - eHD / 2;
+        const eHdY = eTopY - eHD + 5 * sc;
         const faceR = e.wx < g.wx;
         const eBob = Math.sin(e.step / 145) * 2;
-        const armX = faceR ? ebx + ENEMY_W - 2 : ebx - 18;
+        const armX = faceR ? ebx + eW - 2 : ebx - 18 * sc;
         const hpPctE = Math.max(0, e.hp / e.maxHp);
-        const ec = ENEMY_COLS[e.etype];
+        const ec = e.boss
+          ? { body: C.bossBody, head: C.bossHead, shirt: '#3A1420', pants: '#241018' }
+          : ENEMY_COLS[e.etype];
 
         return (
           <View key={e.id} style={StyleSheet.absoluteFill} pointerEvents="none">
             {!e.dead && (
-              <View style={[st.eHpBg, { left: ebx - 3, top: eHdY - 12, width: ENEMY_W + 6 }]}>
-                <View style={[st.eHpFill, {
-                  width: `${hpPctE * 100}%`,
-                  backgroundColor: hpPctE > 0.5 ? C.hpGreen : C.hpRed,
-                }]} />
-              </View>
+              <>
+                {e.boss && (
+                  <Text style={{
+                    position: 'absolute', left: ebx - 10, top: eHdY - 28,
+                    width: eW + 20, textAlign: 'center',
+                    color: '#FF4D4D', fontSize: 10, fontWeight: '900', letterSpacing: 2,
+                    textShadowColor: '#000', textShadowRadius: 3,
+                    textShadowOffset: { width: 0, height: 1 },
+                  }}>
+                    BOSS
+                  </Text>
+                )}
+                <View style={[st.eHpBg, { left: ebx - 3, top: eHdY - 12, width: eW + 6, height: e.boss ? 7 : 5 }]}>
+                  <View style={[st.eHpFill, {
+                    width: `${hpPctE * 100}%`,
+                    backgroundColor: e.boss ? '#B32EFF' : hpPctE > 0.5 ? C.hpGreen : C.hpRed,
+                  }]} />
+                </View>
+              </>
             )}
             <View style={{
               position: 'absolute', left: eHdX, top: eHdY + eBob,
-              width: ENEMY_HEAD_D, height: ENEMY_HEAD_D,
-              borderRadius: ENEMY_HEAD_D / 2, backgroundColor: ec.head,
+              width: eHD, height: eHD,
+              borderRadius: eHD / 2, backgroundColor: ec.head,
               opacity: e.dead ? e.fade : 1,
             }} />
             {!e.dead && (
               <>
-                {/* Bulging comic eyes */}
+                {/* Bulging comic eyes — boss gets angry red eyes */}
                 <View style={{
-                  position: 'absolute', left: eHdX + 2.5, top: eHdY + 5 + eBob,
-                  width: 6.5, height: 6.5, borderRadius: 3.25, backgroundColor: '#F2EFE0',
+                  position: 'absolute', left: eHdX + 2.5 * sc, top: eHdY + 5 * sc + eBob,
+                  width: 6.5 * sc, height: 6.5 * sc, borderRadius: 3.25 * sc,
+                  backgroundColor: e.boss ? '#FF3020' : '#F2EFE0',
                 }} />
                 <View style={{
-                  position: 'absolute', left: eHdX + ENEMY_HEAD_D - 9, top: eHdY + 5 + eBob,
-                  width: 6.5, height: 6.5, borderRadius: 3.25, backgroundColor: '#F2EFE0',
+                  position: 'absolute', left: eHdX + eHD - 9 * sc, top: eHdY + 5 * sc + eBob,
+                  width: 6.5 * sc, height: 6.5 * sc, borderRadius: 3.25 * sc,
+                  backgroundColor: e.boss ? '#FF3020' : '#F2EFE0',
                 }} />
                 <View style={{
-                  position: 'absolute', left: faceR ? eHdX + 6 : eHdX + 3.5,
-                  top: eHdY + 7 + eBob,
-                  width: 2.5, height: 2.5, borderRadius: 1.25, backgroundColor: '#131313',
+                  position: 'absolute', left: faceR ? eHdX + 6 * sc : eHdX + 3.5 * sc,
+                  top: eHdY + 7 * sc + eBob,
+                  width: 2.5 * sc, height: 2.5 * sc, borderRadius: 1.25 * sc, backgroundColor: '#131313',
                 }} />
                 <View style={{
-                  position: 'absolute', left: faceR ? eHdX + ENEMY_HEAD_D - 5.5 : eHdX + ENEMY_HEAD_D - 8,
-                  top: eHdY + 7 + eBob,
-                  width: 2.5, height: 2.5, borderRadius: 1.25, backgroundColor: '#131313',
+                  position: 'absolute', left: faceR ? eHdX + eHD - 5.5 * sc : eHdX + eHD - 8 * sc,
+                  top: eHdY + 7 * sc + eBob,
+                  width: 2.5 * sc, height: 2.5 * sc, borderRadius: 1.25 * sc, backgroundColor: '#131313',
                 }} />
                 {/* Gaping mouth */}
                 <View style={{
-                  position: 'absolute', left: eHdX + 6, top: eHdY + 13.5 + eBob,
-                  width: 7, height: 4, borderRadius: 2, backgroundColor: '#2A1210',
+                  position: 'absolute', left: eHdX + 6 * sc, top: eHdY + 13.5 * sc + eBob,
+                  width: 7 * sc, height: 4 * sc, borderRadius: 2 * sc, backgroundColor: '#2A1210',
                 }} />
                 {/* Head gash */}
                 <View style={{
-                  position: 'absolute', left: eHdX + (faceR ? 12 : 3), top: eHdY + 1 + eBob,
-                  width: 5, height: 3, borderRadius: 1.5, backgroundColor: '#8B2010',
+                  position: 'absolute', left: eHdX + (faceR ? 12 : 3) * sc, top: eHdY + 1 * sc + eBob,
+                  width: 5 * sc, height: 3 * sc, borderRadius: 1.5 * sc, backgroundColor: '#8B2010',
                 }} />
               </>
             )}
             <View style={{
               position: 'absolute', left: ebx, top: eTopY + eBob,
-              width: ENEMY_W, height: ENEMY_H,
-              backgroundColor: ec.body, borderRadius: 4,
+              width: eW, height: eH,
+              backgroundColor: ec.body, borderRadius: 4 * sc,
               opacity: e.dead ? e.fade : 1,
             }} />
             {/* Ragged pants */}
             <View style={{
-              position: 'absolute', left: ebx + 1, top: eTopY + ENEMY_H * 0.6 + eBob,
-              width: ENEMY_W - 2, height: ENEMY_H * 0.4,
+              position: 'absolute', left: ebx + 1, top: eTopY + eH * 0.6 + eBob,
+              width: eW - 2, height: eH * 0.4,
               backgroundColor: ec.pants,
-              borderBottomLeftRadius: 4, borderBottomRightRadius: 4,
+              borderBottomLeftRadius: 4 * sc, borderBottomRightRadius: 4 * sc,
               opacity: e.dead ? e.fade : 1,
             }} />
             {/* Torn shirt hem */}
             <View style={{
-              position: 'absolute', left: ebx, top: eTopY + ENEMY_H * 0.58 + eBob,
-              width: ENEMY_W, height: 2.5,
+              position: 'absolute', left: ebx, top: eTopY + eH * 0.58 + eBob,
+              width: eW, height: 2.5 * sc,
               backgroundColor: 'rgba(0,0,0,0.4)',
               opacity: e.dead ? e.fade : 1,
             }} />
             {/* Shirt stain / blood splatter */}
             {!e.dead && (
               <View style={{
-                position: 'absolute', left: ebx + (e.etype === 1 ? 4 : ENEMY_W - 11), top: eTopY + 10 + eBob,
-                width: 7, height: 6, borderRadius: 3, backgroundColor: '#6B1408', opacity: 0.75,
+                position: 'absolute', left: ebx + (e.etype === 1 ? 4 * sc : eW - 11 * sc), top: eTopY + 10 * sc + eBob,
+                width: 7 * sc, height: 6 * sc, borderRadius: 3 * sc, backgroundColor: '#6B1408', opacity: 0.75,
               }} />
             )}
             {!e.dead && (
               <View style={{
-                position: 'absolute', left: armX, top: eTopY + 12 + eBob,
-                width: 18, height: 8, backgroundColor: ec.head, borderRadius: 4,
+                position: 'absolute', left: armX, top: eTopY + 12 * sc + eBob,
+                width: 18 * sc, height: 8 * sc, backgroundColor: ec.head, borderRadius: 4 * sc,
               }} />
             )}
             {e.dead && e.fade > 0.3 && (
               <View style={{
                 position: 'absolute', left: ebx - 4, top: groundY - 8,
-                width: ENEMY_W + 8, height: 8,
+                width: eW + 8, height: 8,
                 backgroundColor: C.blood, borderRadius: 5, opacity: e.fade * 0.8,
               }} />
             )}
@@ -1253,8 +1423,24 @@ export default function GameScreen() {
       {/* Wave banner */}
       {g.waveMsg > 200 && (
         <View style={[st.waveBanner, { top: topOff + HUD_H + 28 }]}>
-          <Text style={st.waveBannerTxt}>WAVE {g.wave}</Text>
-          <Text style={st.waveBannerSub}>INCOMING!</Text>
+          <Text style={[st.waveBannerTxt, isBossWave(g.wave) && { color: '#FF4D4D' }]}>WAVE {g.wave}</Text>
+          <Text style={st.waveBannerSub}>{isBossWave(g.wave) ? 'BOSS FIGHT!' : 'INCOMING!'}</Text>
+        </View>
+      )}
+
+      {/* Checkpoint banner */}
+      {g.cpMsg > 200 && g.waveMsg <= 200 && (
+        <View style={[st.waveBanner, { top: topOff + HUD_H + 28 }]}>
+          <Text style={[st.waveBannerTxt, { fontSize: 26, color: C.cpFlag, textShadowColor: '#052' }]}>CHECKPOINT!</Text>
+          <Text style={[st.waveBannerSub, { color: C.hpGreen }]}>FULL LIFE RESTORED</Text>
+        </View>
+      )}
+
+      {/* Round-clear hint: head to the endpoint flag */}
+      {g.spawnQ === 0 && g.enemies.filter(e => !e.dead).length === 0 && g.wx < g.roundStart + ROUND_LEN && g.waveMsg <= 200 && g.cpMsg <= 200 && (
+        <View style={[st.waveBanner, { top: topOff + HUD_H + 28 }]}>
+          <Text style={[st.waveBannerTxt, { fontSize: 20, color: C.gold, textShadowColor: '#000' }]}>ZOMBIES CLEARED</Text>
+          <Text style={[st.waveBannerSub, { color: C.goldDim, marginTop: -2 }]}>REACH THE FLAG →</Text>
         </View>
       )}
 
