@@ -1,0 +1,1 @@
+- [Zombillies conventions](zombillies-conventions.md) — game/audio conventions and pre-existing typecheck errors to ignore.

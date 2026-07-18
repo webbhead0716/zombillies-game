@@ -36,3 +36,9 @@ id = "_jgk6SoIymbhs-wWi8rxL"
 uri = "file://artifacts/zombillies/assets/audio/music_bluegrass.mp3"
 type = "audio"
 title = "spooky bluegrass loop"
+
+[[outputs]]
+id = "_-T0A0aAFMGylJe51dmPc"
+uri = "file://artifacts/zombillies/assets/audio/music_rockabilly.mp3"
+type = "audio"
+title = "rockabilly powerup loop"

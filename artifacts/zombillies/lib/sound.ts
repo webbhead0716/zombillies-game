@@ -13,7 +13,17 @@ const SRC = {
 
 export type SfxName = keyof typeof SRC;
 
-const MUSIC_SRC = require('../assets/audio/music_bluegrass.mp3');
+const MUSIC_SRC = {
+  bluegrass: require('../assets/audio/music_bluegrass.mp3'),
+  rockabilly: require('../assets/audio/music_rockabilly.mp3'),
+} as const;
+
+export type MusicTrack = keyof typeof MUSIC_SRC;
+
+const MUSIC_VOL: Record<MusicTrack, number> = {
+  bluegrass: 0.45,
+  rockabilly: 0.55,
+};
 
 let audioModeSet = false;
 async function ensureAudioMode() {
@@ -77,26 +87,51 @@ export function playSfx(name: SfxName) {
 
     // On web, autoplay policy may have blocked music at mount time. SFX only
     // fire from user gestures, so this is a safe place to unlock the music.
-    if (musicWanted && music && !music.playing) music.play();
+    if (musicWanted) {
+      const m = musicPlayers.get(currentTrack);
+      if (m && !m.playing) m.play();
+    }
   } catch {
     // never let audio break the game
   }
 }
 
 // ── Music ──────────────────────────────────────────────────────────────────────
-let music: AudioPlayer | null = null;
+const musicPlayers = new Map<MusicTrack, AudioPlayer>();
+let currentTrack: MusicTrack = 'bluegrass';
 let musicWanted = false;
 
-export function startMusic() {
+function getMusic(track: MusicTrack): AudioPlayer {
+  let m = musicPlayers.get(track);
+  if (!m) {
+    m = createAudioPlayer(MUSIC_SRC[track]);
+    m.loop = true;
+    m.volume = MUSIC_VOL[track];
+    musicPlayers.set(track, m);
+  }
+  return m;
+}
+
+export function startMusic(track: MusicTrack = 'bluegrass') {
   try {
     ensureAudioMode();
     musicWanted = true;
-    if (!music) {
-      music = createAudioPlayer(MUSIC_SRC);
-      music.loop = true;
-      music.volume = 0.45;
-    }
-    music.play();
+    currentTrack = track;
+    getMusic(track).play();
+  } catch {
+    // non-fatal
+  }
+}
+
+/** Crossless swap to another looping track (e.g. rockabilly during mic mode). */
+export function switchMusic(track: MusicTrack) {
+  try {
+    if (track === currentTrack) return;
+    const prev = musicPlayers.get(currentTrack);
+    prev?.pause();
+    prev?.seekTo(0);
+    currentTrack = track;
+    if (musicWanted) getMusic(track).play();
   } catch {
     // non-fatal
   }
@@ -105,8 +140,10 @@ export function startMusic() {
 export function stopMusic() {
   try {
     musicWanted = false;
-    music?.pause();
-    music?.seekTo(0);
+    for (const m of musicPlayers.values()) {
+      m.pause();
+      m.seekTo(0);
+    }
   } catch {
     // non-fatal
   }
@@ -116,9 +153,10 @@ export function stopMusic() {
 export function disposeAudio() {
   try {
     musicWanted = false;
-    music?.pause();
-    music?.remove();
-    music = null;
+    for (const m of musicPlayers.values()) {
+      try { m.pause(); m.remove(); } catch {}
+    }
+    musicPlayers.clear();
     for (const pool of pools.values()) {
       for (const p of pool.players) {
         try { p.pause(); p.remove(); } catch {}
@@ -133,12 +171,14 @@ export function disposeAudio() {
 
 export function duckMusic(volume = 0.18) {
   try {
-    if (music) music.volume = volume;
+    const m = musicPlayers.get(currentTrack);
+    if (m) m.volume = volume;
   } catch {}
 }
 
 export function restoreMusic() {
   try {
-    if (music) music.volume = 0.45;
+    const m = musicPlayers.get(currentTrack);
+    if (m) m.volume = MUSIC_VOL[currentTrack];
   } catch {}
 }

@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { playSfx, startMusic, stopMusic, disposeAudio } from '../../lib/sound';
+import { playSfx, startMusic, stopMusic, switchMusic, disposeAudio } from '../../lib/sound';
 import {
   View,
   Text,
@@ -70,6 +70,21 @@ const C = {
   chiliBody: '#8B3A00',
   chiliTop: '#CC3A00',
   chiliSteam: '#B08060',
+  micBody: '#C8C8D0',
+  micGrill: '#8A8A94',
+  micHandle: '#2A2A32',
+  micGold: '#FFD24A',
+  // Street furniture
+  poleCol: '#23222A',
+  lampGlow: '#FFD98A',
+  crateCol: '#5A3A18',
+  crateEdge: '#3A2408',
+  carBody: '#4A3540',
+  carDark: '#2A1C24',
+  barricadeA: '#B8541A',
+  barricadeB: '#3A3230',
+  platformCol: '#3A3028',
+  platformTop: '#5C4A34',
 };
 
 // ── Layout ────────────────────────────────────────────────────────────────────
@@ -121,6 +136,32 @@ const HS_KEY = 'zb_hs';
 const POWERUP_PICKUP_R = 38;     // pickup radius (world px)
 const POWERUP_FIRST_SPAWN = 10000;
 const POWERUP_RESPAWN = 18000;
+const MIC_DURATION = 9000;       // mic mode: timed invincibility + speed
+const MIC_SPEED_MULT = 1.75;
+
+// ── Platforms & obstacles (world space) ──────────────────────────────────────
+interface Solid { wx: number; w: number; h: number; kind: 'car' | 'crate' | 'barricade' | 'platform'; }
+
+// Ground obstacles — jump over them (they block walking) or hop on top
+const OBSTACLES: Solid[] = Array.from({ length: 24 }, (_, i) => {
+  const kind = (i % 3 === 0 ? 'car' : i % 3 === 1 ? 'crate' : 'barricade') as Solid['kind'];
+  return {
+    wx: (i - 12) * 560 + (i % 3) * 90 + 150,
+    w: kind === 'car' ? 66 : kind === 'crate' ? 30 : 44,
+    h: kind === 'car' ? 26 : kind === 'crate' ? 30 : 17,
+    kind,
+  };
+});
+
+// Floating platforms — jump onto them
+const PLATFORMS: Solid[] = Array.from({ length: 20 }, (_, i) => ({
+  wx: (i - 10) * 640 + 330,
+  w: 92,
+  h: 66 + (i % 3) * 14,
+  kind: 'platform' as const,
+}));
+
+const SOLIDS_ALL: Solid[] = [...OBSTACLES, ...PLATFORMS];
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Enemy {
@@ -152,7 +193,7 @@ interface HitEffect {
 
 interface Powerup {
   id: string;
-  type: 'ketchup' | 'chili';
+  type: 'ketchup' | 'chili' | 'mic';
   wx: number;
   bobT: number;  // for idle float animation
 }
@@ -175,6 +216,8 @@ interface GS {
   hitEffects: HitEffect[];
   powerups: Powerup[];
   activePowerup: 'ketchup' | 'chili' | null;
+  micT: number;        // timed mic mode: invincible + fast
+  puCount: number;     // rotates powerup spawn types
   powerupSpawnT: number;
   nextId: number;
   score: number;
@@ -194,6 +237,7 @@ function mkGS(): GS {
     atkActive: false, atkT: 0, iframeT: 0, dmgFlash: 0, step: 0,
     enemies: [], dvds: [], hitEffects: [],
     powerups: [], activePowerup: null,
+    micT: 0, puCount: 0,
     powerupSpawnT: POWERUP_FIRST_SPAWN,
     nextId: 0,
     score: 0, wave: 1,
@@ -218,15 +262,34 @@ function spawnEnemy(g: GS) {
 function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   if (g.phase !== 'playing') return;
 
-  // Player movement
-  if (holdL) { g.wx -= PLAYER_SPD; g.faceR = false; }
-  if (holdR) { g.wx += PLAYER_SPD; g.faceR = true; }
+  // Player movement (mic mode = speed boost)
+  const spd = g.micT > 0 ? PLAYER_SPD * MIC_SPEED_MULT : PLAYER_SPD;
+  const prevWx = g.wx;
+  if (holdL) { g.wx -= spd; g.faceR = false; }
+  if (holdR) { g.wx += spd; g.faceR = true; }
   if ((holdL || holdR) && g.grounded) g.step += TICK_MS;
 
-  // Vertical physics
+  // Obstacles block walking (jump over them, or hop on top).
+  // Swept: resolve to the side the player came from, so a fast move can't
+  // tunnel through or teleport across an obstacle.
+  for (const s of OBSTACLES) {
+    const half = s.w / 2 + PLAYER_W / 2 - 4;
+    if (Math.abs(g.wx - s.wx) < half && g.ay < s.h - 3) {
+      g.wx = s.wx + (prevWx >= s.wx ? half : -half);
+    }
+  }
+
+  // Vertical physics — land on ground, obstacles, or floating platforms
+  const prevAy = g.ay;
   g.vy += GRAV;
   g.ay -= g.vy;
-  if (g.ay <= 0) { g.ay = 0; g.vy = 0; g.grounded = true; }
+  let supportH = 0;
+  for (const s of SOLIDS_ALL) {
+    if (Math.abs(g.wx - s.wx) < s.w / 2 + PLAYER_W / 2 - 6 && prevAy >= s.h - 2) {
+      supportH = Math.max(supportH, s.h);
+    }
+  }
+  if (g.ay <= supportH && g.vy >= 0) { g.ay = supportH; g.vy = 0; g.grounded = true; }
   else g.grounded = false;
 
   // Timers
@@ -234,6 +297,10 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   if (g.iframeT > 0) g.iframeT -= TICK_MS;
   if (g.dmgFlash > 0) g.dmgFlash -= TICK_MS;
   if (g.waveMsg > 0) g.waveMsg -= TICK_MS;
+  if (g.micT > 0) {
+    g.micT -= TICK_MS;
+    if (g.micT <= 0) { g.micT = 0; switchMusic('bluegrass'); }
+  }
 
   // Power-ups persist until Bill takes damage (cleared in enemy attack block)
 
@@ -241,8 +308,9 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   g.powerupSpawnT -= TICK_MS;
   if (g.powerupSpawnT <= 0 && g.powerups.length < 2) {
     const side = g.nextId % 2 === 0 ? 1 : -1;
-    // Alternate between ketchup and chili
-    const type = (g.nextId % 2 === 0) ? 'ketchup' : 'chili';
+    // Rotate ketchup → chili → mic
+    const type = (['ketchup', 'chili', 'mic'] as const)[g.puCount % 3];
+    g.puCount++;
     g.powerups.push({
       id: `pu${++g.nextId}`, type,
       wx: g.wx + side * (SW * 0.35 + 40),
@@ -257,7 +325,12 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     p.bobT += TICK_MS;
     if (Math.abs(p.wx - g.wx) < POWERUP_PICKUP_R && g.ay < 10) {
       // Picked up
-      g.activePowerup = p.type;
+      if (p.type === 'mic') {
+        g.micT = MIC_DURATION;
+        switchMusic('rockabilly');
+      } else {
+        g.activePowerup = p.type;
+      }
       playSfx('powerup');
     } else {
       remaining.push(p);
@@ -284,7 +357,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     if (dist > ENEMY_ATK_RANGE - 4) { e.wx += dir * ENEMY_SPD; e.step += TICK_MS; }
 
     if (e.atkCd > 0) e.atkCd -= TICK_MS;
-    if (dist < ENEMY_ATK_RANGE && e.atkCd <= 0 && g.iframeT <= 0) {
+    if (dist < ENEMY_ATK_RANGE && e.atkCd <= 0 && g.iframeT <= 0 && g.micT <= 0) {
       g.hp -= ENEMY_DMG;
       g.iframeT = IFRAME_DUR;
       g.dmgFlash = 280;
@@ -386,6 +459,23 @@ const CITY = Array.from({ length: 30 }, (_, i) => ({
   broken: i % 3 === 0, // jagged / collapsed top
 }));
 
+// Street lights — flicker on/off (some are dead)
+const STREETLIGHTS = Array.from({ length: 26 }, (_, i) => ({
+  wx: (i - 13) * 520 + 60,
+  broken: i % 4 === 0,
+}));
+
+// Neon bar signs on the midground buildings
+const NEONS = [
+  { wx: -3600, text: 'LIVE MUSIC', col: '#C46BFF', h: 96 },
+  { wx: -2200, text: 'MOTEL', col: '#FFB020', h: 118 },
+  { wx: -900, text: 'BAR', col: '#FF2E88', h: 88 },
+  { wx: 350, text: 'KARAOKE', col: '#28E0FF', h: 108 },
+  { wx: 1600, text: 'EAT', col: '#7CFF3A', h: 92 },
+  { wx: 2900, text: 'BAR', col: '#FF2E88', h: 120 },
+  { wx: 4300, text: 'DINER', col: '#FF5030', h: 100 },
+];
+
 // Powerup icons (drawn with View shapes)
 function KetchupIcon({ size = 1, opacity = 1 }: { size?: number; opacity?: number }) {
   const s = size;
@@ -421,6 +511,31 @@ function ChiliBowlIcon({ size = 1, opacity = 1 }: { size?: number; opacity?: num
       {/* Bowl */}
       <View style={{ width: 34 * s, height: 6 * s, backgroundColor: C.chiliTop, borderRadius: 3 * s }} />
       <View style={{ width: 34 * s, height: 14 * s, backgroundColor: C.chiliBody, borderBottomLeftRadius: 8 * s, borderBottomRightRadius: 8 * s }} />
+    </View>
+  );
+}
+
+function MicIcon({ size = 1, opacity = 1 }: { size?: number; opacity?: number }) {
+  const s = size;
+  return (
+    <View style={{ width: 20 * s, height: 38 * s, alignItems: 'center', opacity }}>
+      {/* Ball head */}
+      <View style={{
+        width: 18 * s, height: 18 * s, borderRadius: 9 * s,
+        backgroundColor: C.micBody, alignItems: 'center', justifyContent: 'center',
+      }}>
+        {/* Grill lines */}
+        <View style={{ width: 12 * s, height: 1.6 * s, backgroundColor: C.micGrill, marginBottom: 2 * s }} />
+        <View style={{ width: 14 * s, height: 1.6 * s, backgroundColor: C.micGrill, marginBottom: 2 * s }} />
+        <View style={{ width: 12 * s, height: 1.6 * s, backgroundColor: C.micGrill }} />
+      </View>
+      {/* Neck ring */}
+      <View style={{ width: 8 * s, height: 3 * s, backgroundColor: C.micGold }} />
+      {/* Handle */}
+      <View style={{
+        width: 7 * s, height: 15 * s, backgroundColor: C.micHandle,
+        borderBottomLeftRadius: 3 * s, borderBottomRightRadius: 3 * s,
+      }} />
     </View>
   );
 }
@@ -504,6 +619,8 @@ export default function GameScreen() {
 
   const isKetchupActive = g.activePowerup === 'ketchup';
   const isChiliActive = g.activePowerup === 'chili';
+  const micActive = g.micT > 0;
+  const tNow = Date.now();
 
   // DVD button glow color based on active powerup
   const dvdBtnColor = isKetchupActive
@@ -561,6 +678,31 @@ export default function GameScreen() {
             </View>
           );
         })}
+        {/* Neon bar signs — mounted on midground buildings, flickering */}
+        {NEONS.map((n, i) => {
+          const sx = SW / 2 + (n.wx - g.wx) * 0.55;
+          if (sx < -120 || sx > SW + 120) return null;
+          const on = Math.sin(tNow / 210 + i * 17) > -0.9;
+          const glow = on ? 1 : 0.12;
+          return (
+            <View key={`n${i}`} style={{
+              position: 'absolute', left: sx - 30, bottom: GROUND_H + n.h,
+              paddingHorizontal: 6, paddingVertical: 3,
+              backgroundColor: '#0A0810',
+              borderWidth: 1.5, borderColor: n.col, borderRadius: 4,
+              opacity: 0.25 + glow * 0.75,
+            }}>
+              <Text style={{
+                color: n.col, fontSize: 10, fontWeight: '900', letterSpacing: 2,
+                opacity: glow,
+                textShadowColor: n.col, textShadowRadius: on ? 9 : 0,
+                textShadowOffset: { width: 0, height: 0 },
+              }}>
+                {n.text}
+              </Text>
+            </View>
+          );
+        })}
         <View style={[st.hill, { bottom: GROUND_H, left: -20, width: SW * 0.55, height: 70 }]} />
         <View style={[st.hill, { bottom: GROUND_H, left: SW * 0.38, width: SW * 0.65, height: 50 }]} />
         {visTrees.map((t, i) => {
@@ -579,6 +721,131 @@ export default function GameScreen() {
       <View style={[st.ground, { top: groundY, height: GROUND_H, backgroundColor: C.ground }]} />
       <View style={[st.groundTop, { top: groundY }]} />
 
+      {/* ── Street lights (flickering) ── */}
+      {STREETLIGHTS.map((l, i) => {
+        const sx = SW / 2 + (l.wx - g.wx);
+        if (sx < -60 || sx > SW + 60) return null;
+        const poleH = 96;
+        const on = !l.broken && Math.sin(tNow / 75 + i * 5.3) > -0.82;
+        return (
+          <View key={`sl${i}`} pointerEvents="none" style={StyleSheet.absoluteFill}>
+            {/* Pole */}
+            <View style={{
+              position: 'absolute', left: sx - 1.5, top: groundY - poleH,
+              width: 3, height: poleH, backgroundColor: C.poleCol,
+            }} />
+            {/* Arm */}
+            <View style={{
+              position: 'absolute', left: sx - 1.5, top: groundY - poleH,
+              width: 15, height: 3, backgroundColor: C.poleCol,
+            }} />
+            {/* Lamp head */}
+            <View style={{
+              position: 'absolute', left: sx + 9, top: groundY - poleH + 1,
+              width: 10, height: 5, borderRadius: 2,
+              backgroundColor: on ? C.lampGlow : '#141318',
+            }} />
+            {/* Light cone */}
+            {on && (
+              <View style={{
+                position: 'absolute', left: sx + 14 - 17, top: groundY - poleH + 6,
+                width: 0, height: 0,
+                borderLeftWidth: 17, borderRightWidth: 17,
+                borderBottomWidth: poleH - 8,
+                borderLeftColor: 'transparent', borderRightColor: 'transparent',
+                borderStyle: 'solid',
+                borderBottomColor: 'rgba(255,215,130,0.10)',
+              }} />
+            )}
+          </View>
+        );
+      })}
+
+      {/* ── Floating platforms ── */}
+      {PLATFORMS.map((p, i) => {
+        const sx = SW / 2 + (p.wx - g.wx);
+        if (sx < -120 || sx > SW + 120) return null;
+        const topY = groundY - p.h;
+        return (
+          <View key={`pl${i}`} pointerEvents="none" style={StyleSheet.absoluteFill}>
+            <View style={{
+              position: 'absolute', left: sx - p.w / 2, top: topY,
+              width: p.w, height: 9, backgroundColor: C.platformCol,
+              borderRadius: 3, borderTopWidth: 2.5, borderTopColor: C.platformTop,
+            }} />
+            {/* Rusty brackets */}
+            <View style={{ position: 'absolute', left: sx - p.w / 2 + 6, top: topY + 9, width: 3, height: 8, backgroundColor: C.platformCol }} />
+            <View style={{ position: 'absolute', left: sx + p.w / 2 - 9, top: topY + 9, width: 3, height: 8, backgroundColor: C.platformCol }} />
+          </View>
+        );
+      })}
+
+      {/* ── Ground obstacles (wrecked cars, crates, barricades) ── */}
+      {OBSTACLES.map((o, i) => {
+        const sx = SW / 2 + (o.wx - g.wx);
+        if (sx < -120 || sx > SW + 120) return null;
+        const lx = sx - o.w / 2;
+        const topY = groundY - o.h;
+        if (o.kind === 'car') {
+          return (
+            <View key={`ob${i}`} pointerEvents="none" style={StyleSheet.absoluteFill}>
+              {/* Cabin */}
+              <View style={{
+                position: 'absolute', left: lx + o.w * 0.22, top: topY - 9,
+                width: o.w * 0.5, height: 11, backgroundColor: C.carDark,
+                borderTopLeftRadius: 6, borderTopRightRadius: 6,
+              }} />
+              {/* Body */}
+              <View style={{
+                position: 'absolute', left: lx, top: topY,
+                width: o.w, height: o.h - 6, backgroundColor: C.carBody, borderRadius: 5,
+              }} />
+              {/* Wheels (one missing — it's a wreck) */}
+              <View style={{ position: 'absolute', left: lx + 8, top: groundY - 10, width: 11, height: 11, borderRadius: 5.5, backgroundColor: '#111014' }} />
+              <View style={{ position: 'absolute', left: lx + o.w - 20, top: groundY - 6, width: 11, height: 6, borderRadius: 3, backgroundColor: '#111014' }} />
+              {/* Scorch mark */}
+              <View style={{ position: 'absolute', left: lx + o.w * 0.55, top: topY + 2, width: o.w * 0.3, height: 7, borderRadius: 3, backgroundColor: '#141014', opacity: 0.8 }} />
+            </View>
+          );
+        }
+        if (o.kind === 'crate') {
+          return (
+            <View key={`ob${i}`} pointerEvents="none" style={StyleSheet.absoluteFill}>
+              <View style={{
+                position: 'absolute', left: lx, top: topY,
+                width: o.w, height: o.h, backgroundColor: C.crateCol,
+                borderWidth: 2.5, borderColor: C.crateEdge, borderRadius: 2,
+              }} />
+              {/* X planks */}
+              <View style={{
+                position: 'absolute', left: lx + 2, top: topY + o.h / 2 - 1.5,
+                width: o.w - 4, height: 3, backgroundColor: C.crateEdge,
+                transform: [{ rotate: '42deg' }],
+              }} />
+              <View style={{
+                position: 'absolute', left: lx + 2, top: topY + o.h / 2 - 1.5,
+                width: o.w - 4, height: 3, backgroundColor: C.crateEdge,
+                transform: [{ rotate: '-42deg' }],
+              }} />
+            </View>
+          );
+        }
+        // Barricade
+        return (
+          <View key={`ob${i}`} pointerEvents="none" style={StyleSheet.absoluteFill}>
+            <View style={{
+              position: 'absolute', left: lx, top: topY,
+              width: o.w, height: 8, borderRadius: 2, backgroundColor: C.barricadeA,
+            }} />
+            <View style={{ position: 'absolute', left: lx + 8, top: topY, width: 8, height: 8, backgroundColor: C.barricadeB }} />
+            <View style={{ position: 'absolute', left: lx + 26, top: topY, width: 8, height: 8, backgroundColor: C.barricadeB }} />
+            {/* Legs */}
+            <View style={{ position: 'absolute', left: lx + 4, top: topY + 8, width: 3.5, height: o.h - 8, backgroundColor: C.barricadeB }} />
+            <View style={{ position: 'absolute', left: lx + o.w - 8, top: topY + 8, width: 3.5, height: o.h - 8, backgroundColor: C.barricadeB }} />
+          </View>
+        );
+      })}
+
       {/* ── Power-ups on ground ── */}
       {g.powerups.map(p => {
         const sx = SW / 2 + (p.wx - g.wx);
@@ -589,25 +856,27 @@ export default function GameScreen() {
             {/* Glow ring */}
             <View style={{
               position: 'absolute',
-              left: p.type === 'ketchup' ? -8 : -6,
-              top: p.type === 'ketchup' ? -4 : -4,
-              width: p.type === 'ketchup' ? 34 : 48,
-              height: p.type === 'ketchup' ? 46 : 38,
+              left: p.type === 'chili' ? -6 : -8,
+              top: -4,
+              width: p.type === 'chili' ? 48 : 34,
+              height: p.type === 'chili' ? 38 : 46,
               borderRadius: 10,
-              backgroundColor: p.type === 'ketchup' ? 'rgba(200,30,0,0.18)' : 'rgba(180,80,0,0.18)',
+              backgroundColor: p.type === 'ketchup' ? 'rgba(200,30,0,0.18)' : p.type === 'chili' ? 'rgba(180,80,0,0.18)' : 'rgba(255,210,74,0.16)',
               borderWidth: 1.5,
-              borderColor: p.type === 'ketchup' ? 'rgba(255,80,0,0.45)' : 'rgba(255,140,0,0.45)',
+              borderColor: p.type === 'ketchup' ? 'rgba(255,80,0,0.45)' : p.type === 'chili' ? 'rgba(255,140,0,0.45)' : 'rgba(255,210,74,0.6)',
             }} />
             {p.type === 'ketchup'
               ? <KetchupIcon size={1} />
-              : <ChiliBowlIcon size={1} />
+              : p.type === 'chili'
+              ? <ChiliBowlIcon size={1} />
+              : <MicIcon size={1} />
             }
             <Text style={{
-              color: p.type === 'ketchup' ? '#FF8060' : '#FFAA40',
+              color: p.type === 'ketchup' ? '#FF8060' : p.type === 'chili' ? '#FFAA40' : C.micGold,
               fontSize: 8, fontWeight: '900', letterSpacing: 1,
               textAlign: 'center', marginTop: 2,
             }}>
-              {p.type === 'ketchup' ? 'SPREAD' : 'RAPID'}
+              {p.type === 'ketchup' ? 'SPREAD' : p.type === 'chili' ? 'RAPID' : 'MIC!'}
             </Text>
           </View>
         );
@@ -814,6 +1083,17 @@ export default function GameScreen() {
 
       {/* ── Bill (player) ── */}
       <View style={StyleSheet.absoluteFill} pointerEvents="none">
+        {/* Mic mode — golden star aura */}
+        {micActive && (
+          <View style={{
+            position: 'absolute', left: pBodyX - 10, top: pHatTopY - 8 + pBob,
+            width: PLAYER_W + 20, height: PLAYER_H + HEAD_D + HAT_H + 14,
+            borderRadius: 18,
+            backgroundColor: 'rgba(255,210,74,0.14)',
+            borderWidth: 2, borderColor: 'rgba(255,210,74,0.55)',
+            opacity: 0.6 + Math.sin(tNow / 90) * 0.35,
+          }} />
+        )}
         {/* Baseball trucker cap — crown */}
         <View style={{
           position: 'absolute', left: pHatX, top: pHatTopY + pBob,
@@ -938,8 +1218,18 @@ export default function GameScreen() {
         {/* Score + power-up indicator */}
         <View style={st.hudCenter}>
           <Text style={st.hudScoreTxt}>{g.score.toLocaleString()}</Text>
+          {/* Mic mode countdown bar */}
+          {micActive && (
+            <View style={st.puBar}>
+              <View style={[st.puBarFill, {
+                width: `${Math.max(0, (g.micT / MIC_DURATION) * 100)}%`,
+                backgroundColor: C.micGold,
+              }]} />
+              <Text style={[st.puLabel, { color: '#FFF3C4', textShadowColor: '#000', textShadowRadius: 2 }]}>MIC MODE · INVINCIBLE + FAST</Text>
+            </View>
+          )}
           {/* Active power-up bar */}
-          {g.activePowerup && (
+          {!micActive && g.activePowerup && (
             <View style={st.puBar}>
               <View style={[st.puBarFill, {
                 width: '100%',
