@@ -8,7 +8,11 @@ import {
   Dimensions,
   Platform,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
+import {
+  loadUpgrades, loadStats, loadHat, addTeeth, recordRun, saveDailyBest,
+  todayMod, dailySeed, HATS,
+} from '../../lib/progress';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -151,6 +155,20 @@ const VINYL_EVERY = 3;          // every 3rd throw is a vinyl record
 const VINYL_DMG_MULT = 1.6;
 const VINYL_RANGE = SW * 0.95;  // vinyls fly nearly full-screen
 const COMBO_BONUS = 50;         // extra points per additional kill in one throw
+
+// Streak multiplier: kills without taking damage. +0.25x per 5 kills, capped at 3x.
+const streakMult = (streak: number) => Math.min(3, 1 + Math.floor(streak / 5) * 0.25);
+const STREAK_CALLOUTS: Record<number, string> = { 5: 'RAMPAGE!', 10: 'UNSTOPPABLE!', 20: 'ZOMBSLAYER!' };
+const TEETH_PER_KILL = 1;
+const TEETH_PER_BOSS = 10;
+
+// Between-wave perks — pick 1 of 2, effects last the rest of the run
+const PERKS = [
+  { id: 'heal', name: 'HOT MEAL', desc: 'Heal 35 HP now', icon: 'restaurant' as const },
+  { id: 'maxhp', name: 'THICK SKIN', desc: '+20 max HP', icon: 'shield' as const },
+  { id: 'dmg', name: 'ANGRY DISCS', desc: '+15% damage', icon: 'flash' as const },
+  { id: 'spd', name: 'GREASED BOOTS', desc: '+8% move speed', icon: 'walk' as const },
+];
 
 // Scoring / waves
 const SCORE_PER_KILL = 100;
@@ -309,6 +327,24 @@ interface GS {
   shakeT: number;       // screen shake timer (boss impacts)
   hintT: number;        // first-run tutorial hint timer
   roundTotal: number;   // total zombies in this round (for HUD progress)
+  // Progression / upgrades (loaded from storage at mount)
+  maxHp: number;
+  upgDmg: number;       // flat DVD damage bonus from shop upgrades
+  upgMic: number;       // extra mic-mode ms from shop upgrades
+  // Run-scoped perk effects (picked between waves)
+  dmgMult: number;
+  spdMult: number;
+  // Streak / currency / juice
+  streak: number;       // kills since last hit taken
+  teeth: number;        // currency earned this run
+  bossKills: number;
+  slowmoT: number;      // slow-motion timer after boss kills
+  // Daily challenge modifiers
+  daily: boolean;
+  forceRunners: boolean;
+  hpMult: number;
+  noCheckpoints: boolean;
+  seedOffset: number;   // shifts layout RNG for daily runs
   waveMsg: number;
 }
 
@@ -350,6 +386,10 @@ function mkGS(): GS {
     })(),
     solids: genRoundSolids(1, 0),
     throwCount: 0, shakeT: 0, hintT: 7500, roundTotal: 8,
+    maxHp: PLAYER_MAX_HP, upgDmg: 0, upgMic: 0,
+    dmgMult: 1, spdMult: 1,
+    streak: 0, teeth: 0, bossKills: 0, slowmoT: 0,
+    daily: false, forceRunners: false, hpMult: 1, noCheckpoints: false, seedOffset: 0,
     waveMsg: 2500,
   };
 }
@@ -358,13 +398,13 @@ function spawnEnemy(g: GS, boss = false) {
   const side = g.nextId % 2 === 0 ? 1 : -1;
   g.nextId++;
   const jitter = (g.nextId % 5) * 40;
-  const etype = (g.nextId % 3) as 0 | 1 | 2;
+  const etype = (g.forceRunners ? 2 : g.nextId % 3) as 0 | 1 | 2;
   // Boss variety: bosses alternate between the brute and the charger
   const charger = boss && Math.floor(g.wave / 3) % 2 === 0;
   const stats = ETYPE_STATS[etype];
   const hp = boss
     ? Math.round((BOSS_HP_BASE + g.wave * BOSS_HP_PER_WAVE) * (charger ? 0.7 : 1))
-    : Math.round(stats.hp * waveHpMult(g.wave));
+    : Math.round(stats.hp * waveHpMult(g.wave) * g.hpMult);
   g.enemies.push({
     id: `e${g.nextId}`, etype,
     wx: g.wx + side * (SPAWN_DIST + jitter),
@@ -376,11 +416,35 @@ function spawnEnemy(g: GS, boss = false) {
   });
 }
 
+/** Shared kill bookkeeping: streak-multiplied score, teeth, callouts, boss slow-mo. */
+function registerKill(g: GS, e: Enemy) {
+  g.score += Math.round((e.boss ? BOSS_SCORE : SCORE_PER_KILL) * streakMult(g.streak));
+  g.kills++; g.roundKills++;
+  g.streak++;
+  const callout = STREAK_CALLOUTS[g.streak];
+  if (callout) g.hitEffects.push({ id: `h${++g.nextId}`, wx: g.wx, t: 0, text: callout });
+  if (e.boss) {
+    g.teeth += TEETH_PER_BOSS;
+    g.bossKills++;
+    g.slowmoT = 900;  // savor the moment
+    g.shakeT = 420;
+    g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: `+${TEETH_PER_BOSS} 🦷` });
+  } else {
+    g.teeth += TEETH_PER_KILL;
+  }
+}
+
 function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   if (g.phase !== 'playing') return;
 
+  // Boss-kill slow-mo: run the world at half speed by skipping alternate ticks
+  if (g.slowmoT > 0) {
+    g.slowmoT -= TICK_MS;
+    if (Math.floor(g.slowmoT / TICK_MS) % 2 === 0) return;
+  }
+
   // Player movement (mic mode = speed boost)
-  const spd = g.micT > 0 ? PLAYER_SPD * MIC_SPEED_MULT : PLAYER_SPD;
+  const spd = (g.micT > 0 ? PLAYER_SPD * MIC_SPEED_MULT : PLAYER_SPD) * g.spdMult;
   const prevWx = g.wx;
   if (holdL) { g.wx -= spd; g.faceR = false; }
   if (holdR) { g.wx += spd; g.faceR = true; }
@@ -436,9 +500,9 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   }
 
   // Midway checkpoint — crossing it restores full health (once per round)
-  if (!g.checkpointHit && g.wx >= g.roundStart + ROUND_LEN / 2) {
+  if (!g.noCheckpoints && !g.checkpointHit && g.wx >= g.roundStart + ROUND_LEN / 2) {
     g.checkpointHit = true;
-    g.hp = PLAYER_MAX_HP;
+    g.hp = g.maxHp;
     g.dmgFlash = 0;
     g.cpMsg = 2200;
     // Checkpoint ambush — release the reserved burst of zombies
@@ -471,10 +535,10 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     if (Math.abs(p.wx - g.wx) < POWERUP_PICKUP_R && g.ay < 10) {
       // Picked up
       if (p.type === 'mic') {
-        g.micT = MIC_DURATION;
+        g.micT = MIC_DURATION + g.upgMic;
         switchMusic('rockabilly');
       } else if (p.type === 'heart') {
-        g.hp = Math.min(PLAYER_MAX_HP, g.hp + HEART_HEAL);
+        g.hp = Math.min(g.maxHp, g.hp + HEART_HEAL);
         g.dmgFlash = 0;
         g.iframeT = Math.max(g.iframeT, 400);
       } else {
@@ -513,8 +577,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     // Bosses are immune to the touch-kill — they must be damaged with weapons.
     if (g.micT > 0 && !e.boss && dist < eReach + 4) {
       e.dead = true; e.fade = 1;
-      g.score += e.boss ? BOSS_SCORE : SCORE_PER_KILL;
-      g.kills++; g.roundKills++;
+      registerKill(g, e);
       g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: 'FRIED!' });
       playSfx('hit');
       keepE.push(e);
@@ -525,6 +588,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     if (dist < eReach && e.atkCd <= 0 && g.iframeT <= 0 && g.micT <= 0) {
       g.hp -= e.dmg;
       g.hitsTaken++; g.roundHits++;
+      g.streak = 0; // getting hit resets the score multiplier
       g.iframeT = IFRAME_DUR;
       g.dmgFlash = 280;
       if (e.boss) g.shakeT = 340; // boss hits rattle the screen
@@ -571,7 +635,7 @@ function startNextWave(g: GS) {
   g.spawnQ = plan.initial;
   g.spawnMarks = plan.marks;
   g.cpBurst = plan.burst;
-  g.solids = genRoundSolids(g.wave, g.roundStart);
+  g.solids = genRoundSolids(g.wave + g.seedOffset, g.roundStart);
   g.spawnT = 800;
   g.waveMsg = 2500;
   g.dvds = [];
@@ -600,7 +664,8 @@ function doAttack(g: GS) {
   const vinyl = !isKetchup && g.wave >= VINYL_UNLOCK_WAVE && g.throwCount % VINYL_EVERY === 0;
   const range = isKetchup ? KETCHUP_RANGE : vinyl ? VINYL_RANGE : ATTACK_RANGE;
   const dmg = Math.round(
-    dvdDmgForWave(g.wave) * (isChili ? CHILI_DMG_MULT : 1) * (vinyl ? VINYL_DMG_MULT : 1)
+    (dvdDmgForWave(g.wave) + g.upgDmg) * g.dmgMult *
+    (isChili ? CHILI_DMG_MULT : 1) * (vinyl ? VINYL_DMG_MULT : 1)
   );
 
   if (isKetchup) {
@@ -623,13 +688,13 @@ function doAttack(g: GS) {
       e.hp -= dmg;
       hitCount++;
       if (e.boss) g.shakeT = Math.max(g.shakeT, 200); // boss impacts shake the screen
+      else e.wx += dir * 16; // knockback for regular zombies
       const hitTxt = vinyl ? 'SCRRRATCH!' : hitCount > 1 ? 'THWACK!' : dx < range * 0.45 ? 'THWACK!' : 'WHIZZZ!';
       g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: hitTxt });
       if (e.hp <= 0) {
         e.dead = true; e.fade = 1;
-        g.score += e.boss ? BOSS_SCORE : SCORE_PER_KILL;
-        g.kills++; g.roundKills++; killCount++;
-        if (e.boss) g.shakeT = 420;
+        registerKill(g, e);
+        killCount++;
       }
     }
   }
@@ -821,6 +886,35 @@ export default function GameScreen() {
   const [, setFrame] = useState(0);
   const [isDead, setIsDead] = useState(false);
   const [soundOff, setSoundOff] = useState(getMuted());
+  const [bestWave, setBestWave] = useState(0);
+  const persistedRef = useRef(false); // one-shot guard for run persistence
+  const [hatId, setHatId] = useState('classic');
+  const routeParams = useLocalSearchParams<{ mode?: string }>();
+
+  // Load persistent progression + apply daily-challenge modifiers once at mount
+  useEffect(() => {
+    const gg = gsRef.current;
+    if (routeParams.mode === 'daily') {
+      const mod = todayMod();
+      gg.daily = true;
+      gg.seedOffset = dailySeed() % 997;
+      gg.forceRunners = mod.id === 'runners';
+      gg.noCheckpoints = mod.id === 'nocheck';
+      gg.hpMult = mod.id === 'tough' ? 1.5 : 1;
+      gg.solids = genRoundSolids(1 + gg.seedOffset, 0);
+    }
+    loadUpgrades().then(u => {
+      const g2 = gsRef.current;
+      // Only apply if the run is still fresh — never buff/heal mid-run
+      if (g2.wave !== 1 || g2.kills > 0 || g2.hitsTaken > 0 || g2.phase === 'dead') return;
+      g2.maxHp = PLAYER_MAX_HP + u.hp * 10;
+      g2.hp = g2.maxHp;
+      g2.upgDmg = u.dmg * 4;
+      g2.upgMic = u.mic * 3000;
+    });
+    loadStats().then(s => setBestWave(s.bestWave));
+    loadHat().then(setHatId);
+  }, []);
   const held = useRef({ l: false, r: false });
 
   const topOff = insets.top + WEB_TOP;
@@ -863,9 +957,18 @@ export default function GameScreen() {
         params: {
           score: String(g.score), wave: String(g.wave), hs: String(hs), newHs: isNew ? '1' : '0',
           kills: String(g.kills), hits: String(g.hitsTaken),
+          bosses: String(g.bossKills), teeth: String(g.teeth),
+          daily: g.daily ? '1' : '0',
         },
       });
     });
+    // Persist run progression exactly once, even if this effect re-fires
+    if (!persistedRef.current) {
+      persistedRef.current = true;
+      addTeeth(g.teeth);
+      recordRun(g.kills, g.bossKills, g.wave);
+      if (g.daily) saveDailyBest(g.score);
+    }
   }, [isDead]);
 
   const g = gsRef.current;
@@ -886,8 +989,9 @@ export default function GameScreen() {
   const flicker = g.dmgFlash > 0;
   const billHeadCol = flicker ? '#A03020' : C.billHead;
   const billShirtCol = flicker ? C.blood : C.billShirt;
+  const hat = HATS.find(h => h.id === hatId) ?? HATS[0];
 
-  const hpPct = Math.max(0, g.hp / PLAYER_MAX_HP);
+  const hpPct = Math.max(0, g.hp / g.maxHp);
   const hpColor = hpPct > 0.55 ? C.hpGreen : hpPct > 0.28 ? C.hpOrange : C.hpRed;
 
   const visTrees = TREES.filter(t => {
@@ -1481,7 +1585,7 @@ export default function GameScreen() {
         <View style={{
           position: 'absolute', left: pHatX, top: pHatTopY + pBob,
           width: HAT_W, height: HAT_H,
-          backgroundColor: C.billCap,
+          backgroundColor: hat.cap,
           borderTopLeftRadius: HAT_W / 2, borderTopRightRadius: HAT_W / 2,
           borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
           opacity: pOpacity,
@@ -1500,7 +1604,7 @@ export default function GameScreen() {
           left: g.faceR ? pCX + 8 : pCX - 30,
           top: pHatBrimY + 3 + pBob,
           width: 22, height: 3.5,
-          backgroundColor: C.billCapBrim,
+          backgroundColor: hat.visor,
           borderRadius: 2,
           opacity: pOpacity,
         }} />
@@ -1603,7 +1707,13 @@ export default function GameScreen() {
         </View>
         {/* Score + power-up indicator */}
         <View style={st.hudCenter}>
-          <Text style={st.hudScoreTxt}>{g.score.toLocaleString()}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Text style={st.hudScoreTxt}>{g.score.toLocaleString()}</Text>
+            {streakMult(g.streak) > 1 && (
+              <Text style={st.hudMult}>x{streakMult(g.streak).toFixed(2).replace(/\.?0+$/, '')}</Text>
+            )}
+            <Text style={st.hudTeeth}>🦷{g.teeth}</Text>
+          </View>
           {/* Mic mode countdown bar */}
           {micActive && (
             <View style={st.puBar}>
@@ -1669,6 +1779,30 @@ export default function GameScreen() {
         <View style={[st.waveBanner, { top: topOff + HUD_H + 28 }]}>
           <Text style={[st.waveBannerTxt, { fontSize: 20, color: C.gold, textShadowColor: '#000' }]}>ZOMBIES CLEARED</Text>
           <Text style={[st.waveBannerSub, { color: C.goldDim, marginTop: -2 }]}>REACH THE FLAG →</Text>
+        </View>
+      )}
+
+      {/* Low-HP vignette — pulsing red edges when close to death */}
+      {g.phase === 'playing' && hpPct > 0 && hpPct < 0.3 && (
+        <View pointerEvents="none" style={[StyleSheet.absoluteFill, {
+          borderWidth: 7, borderColor: '#CC0000', borderRadius: 2,
+          opacity: 0.25 + 0.3 * Math.abs(Math.sin(tNow / 320)),
+        }]} />
+      )}
+
+      {/* LAST ZOMBIE alert */}
+      {g.phase === 'playing' && g.waveMsg <= 0 &&
+        g.spawnQ === 0 && g.spawnMarks.length === 0 && g.cpBurst === 0 &&
+        g.enemies.filter(e => !e.dead).length === 1 && (
+        <View style={[st.lastZombie, { top: topOff + HUD_H + 8 }]} pointerEvents="none">
+          <Text style={st.lastZombieTxt}>⚠️ LAST ZOMBIE!</Text>
+        </View>
+      )}
+
+      {/* Daily challenge tag */}
+      {g.daily && g.phase === 'playing' && (
+        <View style={[st.dailyTag, { top: topOff + HUD_H + 8 }]} pointerEvents="none">
+          <Text style={st.dailyTagTxt}>📅 DAILY · {todayMod().name}</Text>
         </View>
       )}
 
@@ -1744,20 +1878,49 @@ export default function GameScreen() {
             </View>
             <View style={st.interRow}>
               <Text style={st.interLabel}>HEALTH</Text>
-              <Text style={st.interVal}>{g.hp} / {PLAYER_MAX_HP}</Text>
+              <Text style={st.interVal}>{g.hp} / {g.maxHp}</Text>
             </View>
-            <Pressable
-              style={({ pressed }) => [st.interBtn, pressed && st.interBtnPressed]}
-              onPress={() => {
-                startNextWave(gsRef.current);
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-              }}
-            >
-              <Ionicons name="play" size={18} color="#FFF" />
-              <Text style={st.interBtnTxt}>
-                {isBossWave(g.wave + 1) ? 'NEXT WAVE — BOSS FIGHT!' : `START WAVE ${g.wave + 1}`}
+            <View style={st.interRow}>
+              <Text style={st.interLabel}>TEETH EARNED</Text>
+              <Text style={st.interVal}>🦷 {g.teeth}</Text>
+            </View>
+            {bestWave > 0 && (
+              <Text style={st.interBest}>
+                {g.wave + 1 > bestWave ? '🏆 NEW BEST RUN!' : `BEST RUN: WAVE ${bestWave}`}
               </Text>
-            </Pressable>
+            )}
+            {/* Pick a perk — choosing starts the next wave */}
+            <Text style={st.perkHeader}>
+              PICK A PERK — {isBossWave(g.wave + 1) ? `WAVE ${g.wave + 1} IS A BOSS FIGHT!` : `THEN WAVE ${g.wave + 1}`}
+            </Text>
+            {(() => {
+              const r = mkRng(g.wave * 131 + 17 + g.seedOffset);
+              const i = Math.floor(r() * PERKS.length);
+              const j = (i + 1 + Math.floor(r() * (PERKS.length - 1))) % PERKS.length;
+              return [PERKS[i], PERKS[j]].map(p => (
+                <Pressable
+                  key={p.id}
+                  style={({ pressed }) => [st.perkBtn, pressed && st.interBtnPressed]}
+                  onPress={() => {
+                    const gg = gsRef.current;
+                    if (gg.phase !== 'intermission') return;
+                    if (p.id === 'heal') gg.hp = Math.min(gg.maxHp, gg.hp + 35);
+                    else if (p.id === 'maxhp') { gg.maxHp += 20; gg.hp += 20; }
+                    else if (p.id === 'dmg') gg.dmgMult *= 1.15;
+                    else if (p.id === 'spd') gg.spdMult *= 1.08;
+                    startNextWave(gg);
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  }}
+                >
+                  <Ionicons name={p.icon} size={18} color="#F5C842" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={st.perkName}>{p.name}</Text>
+                    <Text style={st.perkDesc}>{p.desc}</Text>
+                  </View>
+                  <Ionicons name="play" size={14} color="rgba(255,255,255,0.4)" />
+                </Pressable>
+              ));
+            })()}
           </View>
         </View>
       )}
@@ -1846,6 +2009,35 @@ const st = StyleSheet.create({
   hudWaveTxt: { color: '#5A4010', fontSize: 9, fontWeight: '700', letterSpacing: 1.5 },
   hudWaveNum: { color: C.goldDim, fontSize: 15, fontWeight: '900', lineHeight: 17 },
   hudRemain: { color: '#7A6A40', fontSize: 9, fontWeight: '700', letterSpacing: 0.5 },
+  hudMult: { color: '#FF9922', fontSize: 13, fontWeight: '900' },
+  hudTeeth: { color: '#C8B888', fontSize: 11, fontWeight: '800' },
+  lastZombie: {
+    position: 'absolute', alignSelf: 'center',
+    backgroundColor: 'rgba(120,10,0,0.85)', borderRadius: 20,
+    paddingHorizontal: 14, paddingVertical: 5,
+    borderWidth: 1, borderColor: '#FF5533',
+  },
+  lastZombieTxt: { color: '#FFD0C0', fontSize: 12, fontWeight: '900', letterSpacing: 1.5 },
+  dailyTag: {
+    position: 'absolute', left: 10,
+    backgroundColor: 'rgba(10,30,60,0.8)', borderRadius: 8,
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderWidth: 1, borderColor: 'rgba(80,140,255,0.4)',
+  },
+  dailyTagTxt: { color: '#9BC0FF', fontSize: 9, fontWeight: '800', letterSpacing: 1 },
+  interBest: { color: '#8A7A40', fontSize: 11, fontWeight: '800', letterSpacing: 1.5, marginTop: 10, alignSelf: 'center' },
+  perkHeader: {
+    color: '#F5C842', fontSize: 11, fontWeight: '900', letterSpacing: 1.5,
+    marginTop: 14, marginBottom: 4, alignSelf: 'center',
+  },
+  perkBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: 'rgba(245,200,66,0.08)',
+    borderWidth: 1, borderColor: 'rgba(245,200,66,0.35)',
+    borderRadius: 14, paddingVertical: 10, paddingHorizontal: 14, marginTop: 8,
+  },
+  perkName: { color: '#FFF', fontSize: 13, fontWeight: '900', letterSpacing: 1 },
+  perkDesc: { color: 'rgba(255,255,255,0.55)', fontSize: 11, fontWeight: '600' },
   pauseBtn: {
     width: 30, height: 30, borderRadius: 15,
     backgroundColor: 'rgba(255,255,255,0.08)',

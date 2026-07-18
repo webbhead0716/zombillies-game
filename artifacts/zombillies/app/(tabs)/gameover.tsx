@@ -32,6 +32,9 @@ export default function GameOverScreen() {
     newHs: string;
     kills: string;
     hits: string;
+    bosses: string;
+    teeth: string;
+    daily: string;
   }>();
 
   const score = parseInt(params.score ?? '0');
@@ -40,6 +43,9 @@ export default function GameOverScreen() {
   const isNewHs = params.newHs === '1';
   const kills = parseInt(params.kills ?? '0');
   const hits = parseInt(params.hits ?? '0');
+  const bosses = parseInt(params.bosses ?? '0');
+  const teeth = parseInt(params.teeth ?? '0');
+  const isDaily = params.daily === '1';
 
   const topOff = insets.top + WEB_TOP;
   const botOff = insets.bottom + WEB_BOT;
@@ -114,6 +120,12 @@ export default function GameOverScreen() {
 
         {/* Stats card */}
         <View style={s.statsCard}>
+          {isDaily && <Text style={s.dailyBadge}>📅 DAILY CHALLENGE RUN</Text>}
+          {/* Shareable run summary */}
+          <Text style={s.runSummary}>
+            WAVE {wave} · {kills} KILLS{bosses > 0 ? ` · ${bosses} BOSS${bosses > 1 ? 'ES' : ''}` : ''}
+          </Text>
+          <View style={s.divider} />
           <View style={s.statRow}>
             <Text style={s.statLabel}>WAVE REACHED</Text>
             <Text style={s.statVal}>{wave}</Text>
@@ -129,6 +141,11 @@ export default function GameOverScreen() {
           <View style={s.statRow}>
             <Text style={s.statLabel}>HITS TAKEN</Text>
             <Text style={s.statVal}>{hits}</Text>
+          </View>
+
+          <View style={s.statRow}>
+            <Text style={s.statLabel}>TEETH EARNED</Text>
+            <Text style={s.statVal}>🦷 {teeth}</Text>
           </View>
 
           <View style={s.divider} />
@@ -250,6 +267,14 @@ const s = StyleSheet.create({
     letterSpacing: 1,
   },
   divider: { height: 1, backgroundColor: '#1E0A0A' },
+  dailyBadge: {
+    color: '#9BC0FF', fontSize: 10, fontWeight: '900', letterSpacing: 2,
+    textAlign: 'center', marginBottom: 6,
+  },
+  runSummary: {
+    color: '#C8B888', fontSize: 13, fontWeight: '900', letterSpacing: 1.5,
+    textAlign: 'center', marginBottom: 4,
+  },
   newHsBadge: {
     backgroundColor: 'rgba(204,34,0,0.18)',
     borderWidth: 1,

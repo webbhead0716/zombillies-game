@@ -9,7 +9,12 @@ import {
   Platform,
 } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
-import { startMusic } from '../../lib/sound';
+import { startMusic, playSfx } from '../../lib/sound';
+import {
+  loadTeeth, spendTeeth, loadUpgrades, saveUpgrades, loadStats, loadHat, saveHat,
+  loadDailyBest, todayMod, hatUnlocked, upgCost,
+  UPG_DEFS, HATS, type Upgrades, type LifetimeStats,
+} from '../../lib/progress';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -51,6 +56,21 @@ const B_HAT_H = 19;
 export default function MenuScreen() {
   const insets = useSafeAreaInsets();
   const [hs, setHs] = useState(0);
+  const [teeth, setTeeth] = useState(0);
+  const [upg, setUpg] = useState<Upgrades>({ hp: 0, dmg: 0, mic: 0 });
+  const [stats, setStats] = useState<LifetimeStats>({ kills: 0, bosses: 0, bestWave: 0 });
+  const [hatId, setHatId] = useState('classic');
+  const [dailyBest, setDailyBest] = useState(0);
+  const [shopOpen, setShopOpen] = useState(false);
+  const [buying, setBuying] = useState(false); // serializes purchases
+
+  const reloadProgress = React.useCallback(() => {
+    loadTeeth().then(setTeeth);
+    loadUpgrades().then(setUpg);
+    loadStats().then(setStats);
+    loadHat().then(setHatId);
+    loadDailyBest().then(setDailyBest);
+  }, []);
 
   const titleY = useRef(new Animated.Value(-80)).current;
   const titleOpacity = useRef(new Animated.Value(0)).current;
@@ -67,7 +87,9 @@ export default function MenuScreen() {
   useFocusEffect(
     React.useCallback(() => {
       startMusic('bluegrass');
-    }, [])
+      AsyncStorage.getItem(HS_KEY).then(v => { if (v) setHs(parseInt(v)); });
+      reloadProgress();
+    }, [reloadProgress])
   );
 
   useEffect(() => {
@@ -218,13 +240,25 @@ export default function MenuScreen() {
         <Text style={s.tagLine2}>THE DVD-ARMED.</Text>
       </Animated.View>
 
-      {/* ── High score ── */}
-      {hs > 0 && (
+      {/* ── High score + teeth ── */}
+      <View style={{ flexDirection: 'row', gap: 10, marginLeft: 22, marginTop: 18 }}>
+        {hs > 0 && (
+          <View style={s.hsBadge}>
+            <Text style={s.hsLabel}>BEST SCORE</Text>
+            <Text style={s.hsVal}>{hs.toLocaleString()}</Text>
+          </View>
+        )}
         <View style={s.hsBadge}>
-          <Text style={s.hsLabel}>BEST SCORE</Text>
-          <Text style={s.hsVal}>{hs.toLocaleString()}</Text>
+          <Text style={s.hsLabel}>TEETH</Text>
+          <Text style={s.hsVal}>🦷 {teeth}</Text>
         </View>
-      )}
+        {stats.bestWave > 0 && (
+          <View style={s.hsBadge}>
+            <Text style={s.hsLabel}>BEST WAVE</Text>
+            <Text style={s.hsVal}>{stats.bestWave}</Text>
+          </View>
+        )}
+      </View>
 
       {/* ── Play button ── */}
       <Animated.View style={[s.playWrap, { transform: [{ scale: pulseAnim }] }]}>
@@ -237,9 +271,107 @@ export default function MenuScreen() {
         </Pressable>
       </Animated.View>
 
+      {/* ── Daily challenge + shop ── */}
+      <View style={{ flexDirection: 'row', gap: 10, marginLeft: 22, marginTop: 14 }}>
+        <Pressable
+          style={({ pressed }) => [s.secBtn, pressed && { opacity: 0.7 }]}
+          onPress={() => router.push({ pathname: '/(tabs)/game', params: { mode: 'daily' } })}
+        >
+          <Ionicons name="calendar" size={16} color="#9BC0FF" />
+          <View>
+            <Text style={s.secBtnTxt}>DAILY · {todayMod().name}</Text>
+            {dailyBest > 0 && <Text style={s.secBtnSub}>today's best: {dailyBest.toLocaleString()}</Text>}
+          </View>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [s.secBtn, pressed && { opacity: 0.7 }]}
+          onPress={() => setShopOpen(true)}
+        >
+          <Ionicons name="cart" size={16} color="#F5C842" />
+          <Text style={s.secBtnTxt}>SHOP</Text>
+        </Pressable>
+      </View>
+
       <Text style={[s.tip, { bottom: botOff + 16 }]}>
         Throw DVDs. Silence the horde. Survive.
       </Text>
+
+      {/* ── Shop modal ── */}
+      {shopOpen && (
+        <View style={[StyleSheet.absoluteFill, s.shopWrap]}>
+          <View style={[s.shopCard, { marginTop: topOff + 30, marginBottom: botOff + 20 }]}>
+            <View style={s.shopHead}>
+              <Text style={s.shopTitle}>GENERAL STORE</Text>
+              <Text style={s.shopTeeth}>🦷 {teeth}</Text>
+              <Pressable onPress={() => setShopOpen(false)} hitSlop={10}>
+                <Ionicons name="close" size={22} color="rgba(255,255,255,0.7)" />
+              </Pressable>
+            </View>
+
+            <Text style={s.shopSection}>PERMANENT UPGRADES</Text>
+            {UPG_DEFS.map(d => {
+              const lvl = upg[d.key];
+              const maxed = lvl >= d.max;
+              const cost = upgCost(lvl);
+              const afford = teeth >= cost;
+              return (
+                <View key={d.key} style={s.upgRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.upgName}>{d.name} <Text style={s.upgLvl}>{'●'.repeat(lvl)}{'○'.repeat(d.max - lvl)}</Text></Text>
+                    <Text style={s.upgDesc}>{d.desc}</Text>
+                  </View>
+                  <Pressable
+                    disabled={maxed || !afford || buying}
+                    style={[s.buyBtn, (maxed || !afford || buying) && { opacity: 0.35 }]}
+                    onPress={async () => {
+                      if (buying) return;
+                      setBuying(true);
+                      try {
+                        const left = await spendTeeth(cost);
+                        if (left === null) return;
+                        const next = { ...upg, [d.key]: lvl + 1 };
+                        await saveUpgrades(next);
+                        setUpg(next); setTeeth(left);
+                        playSfx('powerup');
+                      } finally {
+                        setBuying(false);
+                      }
+                    }}
+                  >
+                    <Text style={s.buyTxt}>{maxed ? 'MAX' : `🦷 ${cost}`}</Text>
+                  </Pressable>
+                </View>
+              );
+            })}
+
+            <Text style={s.shopSection}>TRUCKER CAPS</Text>
+            <View style={{ flexDirection: 'row', gap: 10, flexWrap: 'wrap' }}>
+              {HATS.map(h => {
+                const unlocked = hatUnlocked(h, stats);
+                const active = hatId === h.id;
+                return (
+                  <Pressable
+                    key={h.id}
+                    disabled={!unlocked}
+                    style={[s.hatCell, active && s.hatCellOn, !unlocked && { opacity: 0.4 }]}
+                    onPress={async () => { await saveHat(h.id); setHatId(h.id); playSfx('powerup'); }}
+                  >
+                    <View style={[s.hatSwatch, { backgroundColor: h.cap }]}>
+                      <View style={[s.hatSwatchBrim, { backgroundColor: h.visor }]} />
+                    </View>
+                    <Text style={s.hatName}>{h.name}</Text>
+                    <Text style={s.hatReq}>{unlocked ? (active ? 'WEARING' : 'TAP TO WEAR') : `🔒 ${h.reqTxt}`}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <Text style={s.shopFoot}>
+              Lifetime: {stats.kills.toLocaleString()} kills · {stats.bosses} bosses · earn teeth by killing zombies
+            </Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -319,7 +451,7 @@ const s = StyleSheet.create({
 
   // HS
   hsBadge: {
-    alignSelf: 'flex-start', marginTop: 18, marginLeft: 22,
+    alignSelf: 'flex-start',
     backgroundColor: 'rgba(0,0,0,0.6)',
     borderWidth: 1, borderColor: '#3A2A0A', borderRadius: 12,
     paddingHorizontal: 20, paddingVertical: 9, alignItems: 'flex-start',
@@ -343,4 +475,54 @@ const s = StyleSheet.create({
     position: 'absolute', left: 0, right: 0, textAlign: 'center',
     color: '#3A4A2A', fontSize: 11, letterSpacing: 0.5,
   },
+
+  // Secondary buttons (daily / shop)
+  secBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.14)',
+    borderRadius: 40, paddingHorizontal: 16, paddingVertical: 10,
+  },
+  secBtnTxt: { color: 'rgba(255,255,255,0.8)', fontSize: 11, fontWeight: '900', letterSpacing: 1.5 },
+  secBtnSub: { color: 'rgba(255,255,255,0.4)', fontSize: 9, fontWeight: '600' },
+
+  // Shop
+  shopWrap: { backgroundColor: 'rgba(0,0,0,0.85)', alignItems: 'center', zIndex: 50 },
+  shopCard: {
+    width: SW - 32, flex: 1,
+    backgroundColor: '#0D0A14', borderRadius: 20,
+    borderWidth: 1, borderColor: 'rgba(245,200,66,0.3)',
+    padding: 18,
+  },
+  shopHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  shopTitle: { color: '#F5C842', fontSize: 18, fontWeight: '900', letterSpacing: 2 },
+  shopTeeth: { color: '#C8B888', fontSize: 15, fontWeight: '900' },
+  shopSection: { color: '#7A6A40', fontSize: 10, fontWeight: '900', letterSpacing: 2, marginTop: 16, marginBottom: 8 },
+  upgRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: 12,
+    padding: 10, marginBottom: 8,
+  },
+  upgName: { color: '#FFF', fontSize: 12, fontWeight: '900', letterSpacing: 0.5 },
+  upgLvl: { color: '#F5C842', fontSize: 11 },
+  upgDesc: { color: 'rgba(255,255,255,0.5)', fontSize: 10, marginTop: 1 },
+  buyBtn: {
+    backgroundColor: 'rgba(245,200,66,0.15)', borderWidth: 1, borderColor: 'rgba(245,200,66,0.5)',
+    borderRadius: 20, paddingHorizontal: 12, paddingVertical: 7,
+  },
+  buyTxt: { color: '#F5C842', fontSize: 11, fontWeight: '900' },
+  hatCell: {
+    width: (SW - 32 - 36 - 10) / 2, alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: 12,
+    borderWidth: 1, borderColor: 'transparent', padding: 10,
+  },
+  hatCellOn: { borderColor: '#F5C842' },
+  hatSwatch: {
+    width: 40, height: 20, borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    marginBottom: 6, alignItems: 'flex-start', justifyContent: 'flex-end',
+  },
+  hatSwatchBrim: { width: 22, height: 4, borderRadius: 2, marginLeft: -8, marginBottom: -3 },
+  hatName: { color: '#FFF', fontSize: 10, fontWeight: '900', letterSpacing: 1 },
+  hatReq: { color: 'rgba(255,255,255,0.4)', fontSize: 8.5, fontWeight: '600', marginTop: 2, textAlign: 'center' },
+  shopFoot: { color: 'rgba(255,255,255,0.35)', fontSize: 9.5, marginTop: 14, textAlign: 'center' },
 });
