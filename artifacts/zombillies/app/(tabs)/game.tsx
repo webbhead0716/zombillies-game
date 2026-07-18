@@ -149,7 +149,7 @@ const MIC_SPEED_MULT = 1.75;
 const HEART_HEAL = 50;           // heart power-up: restore HP
 
 // Rounds / checkpoints / boss
-const ROUND_LEN = 2600;          // world px per round; endpoint flag at the end
+const ROUND_LEN = 4000;          // world px per round; endpoint flag at the end
 const BOSS_HP_BASE = 520;
 const BOSS_HP_PER_WAVE = 45;
 const BOSS_DMG = 26;
@@ -270,7 +270,7 @@ function mkGS(): GS {
     kills: 0, hitsTaken: 0, roundKills: 0, roundHits: 0, roundScore: 0,
     nextId: 0,
     score: 0, wave: 1,
-    spawnQ: 3, spawnT: 1000,
+    spawnQ: 8, spawnT: 1000,
     waveMsg: 2500,
   };
 }
@@ -437,7 +437,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   const alive = g.enemies.filter(e => !e.dead).length;
   if (g.spawnQ > 0) {
     g.spawnT -= TICK_MS;
-    if (g.spawnT <= 0) { spawnEnemy(g); g.spawnQ--; g.spawnT = 1200; }
+    if (g.spawnT <= 0) { spawnEnemy(g); g.spawnQ--; g.spawnT = 800; }
   } else if (alive === 0) {
     // Zombies cleared — crossing the endpoint flag ends the round
     if (g.wx >= g.roundStart + ROUND_LEN - 12) {
@@ -458,7 +458,7 @@ function startNextWave(g: GS) {
   g.roundKills = 0;
   g.roundHits = 0;
   g.roundScore = g.score;
-  const cnt = Math.min(3 + (g.wave - 1) * 2, 14);
+  const cnt = Math.min(8 + (g.wave - 1) * 3, 28);
   // Boss waves: a hulking boss plus a slightly thinner horde
   if (isBossWave(g.wave)) {
     spawnEnemy(g, true);
