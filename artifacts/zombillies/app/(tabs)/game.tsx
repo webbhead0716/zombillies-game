@@ -161,26 +161,53 @@ const isBossWave = (w: number) => w > 1 && w % 3 === 0;
 // ── Platforms & obstacles (world space) ──────────────────────────────────────
 interface Solid { wx: number; w: number; h: number; kind: 'car' | 'crate' | 'barricade' | 'platform'; }
 
-// Ground obstacles — jump over them (they block walking) or hop on top
-const OBSTACLES: Solid[] = Array.from({ length: 24 }, (_, i) => {
-  const kind = (i % 3 === 0 ? 'car' : i % 3 === 1 ? 'crate' : 'barricade') as Solid['kind'];
-  return {
-    wx: (i - 12) * 560 + (i % 3) * 90 + 150,
-    w: kind === 'car' ? 66 : kind === 'crate' ? 30 : 44,
-    h: kind === 'car' ? 26 : kind === 'crate' ? 30 : 17,
-    kind,
+// Deterministic seeded RNG (LCG) — each round gets its own layout
+function mkRng(seed: number) {
+  let s = (seed >>> 0) || 1;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
   };
-});
+}
 
-// Floating platforms — jump onto them
-const PLATFORMS: Solid[] = Array.from({ length: 20 }, (_, i) => ({
-  wx: (i - 10) * 640 + 330,
-  w: 92,
-  h: 66 + (i % 3) * 14,
-  kind: 'platform' as const,
-}));
+/**
+ * Generate randomly-placed obstacles & floating platforms for one round.
+ * Density scales with the wave number so later rounds are harder.
+ * The first/last stretches of a round stay clear (spawn point & endpoint flag).
+ */
+function genRoundSolids(wave: number, roundStart: number): Solid[] {
+  const r = mkRng(wave * 7919 + 104729);
+  const solids: Solid[] = [];
+  const from = roundStart + 260;
+  const to = roundStart + ROUND_LEN - 260;
 
-const SOLIDS_ALL: Solid[] = [...OBSTACLES, ...PLATFORMS];
+  // Ground obstacles — more of them each wave
+  const nObs = Math.min(5 + Math.floor(wave * 1.2), 14);
+  for (let i = 0; i < nObs; i++) {
+    const kinds: Solid['kind'][] = ['car', 'crate', 'barricade'];
+    const kind = kinds[Math.floor(r() * 3)];
+    const wx = from + ((to - from) * (i + r() * 0.8)) / nObs;
+    solids.push({
+      wx,
+      w: kind === 'car' ? 62 + r() * 14 : kind === 'crate' ? 26 + r() * 10 : 40 + r() * 12,
+      h: kind === 'car' ? 24 + r() * 5 : kind === 'crate' ? 26 + r() * 8 : 15 + r() * 5,
+      kind,
+    });
+  }
+
+  // Floating platforms — count also scales with wave
+  const nPlat = Math.min(4 + Math.floor(wave * 0.8), 11);
+  for (let i = 0; i < nPlat; i++) {
+    const wx = from + 120 + ((to - from - 240) * (i + r() * 0.7)) / nPlat;
+    solids.push({
+      wx,
+      w: 78 + r() * 34,
+      h: 60 + r() * 34,
+      kind: 'platform',
+    });
+  }
+  return solids;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Enemy {
@@ -254,6 +281,7 @@ interface GS {
   spawnT: number;
   spawnMarks: number[]; // world-x thresholds that each release one zombie
   cpBurst: number;      // zombies released when the checkpoint is crossed
+  solids: Solid[];      // this round's randomly generated obstacles & platforms
   waveMsg: number;
 }
 
@@ -293,6 +321,7 @@ function mkGS(): GS {
       const plan = planWaveSpawns(8, 0);
       return { spawnQ: plan.initial, spawnT: 1000, spawnMarks: plan.marks, cpBurst: plan.burst };
     })(),
+    solids: genRoundSolids(1, 0),
     waveMsg: 2500,
   };
 }
@@ -336,7 +365,8 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   // Obstacles block walking (jump over them, or hop on top).
   // Swept: resolve to the side the player came from, so a fast move can't
   // tunnel through or teleport across an obstacle.
-  for (const s of OBSTACLES) {
+  for (const s of g.solids) {
+    if (s.kind === 'platform') continue;
     const half = s.w / 2 + PLAYER_W / 2 - 4;
     if (Math.abs(g.wx - s.wx) < half && g.ay < s.h - 3) {
       g.wx = s.wx + (prevWx >= s.wx ? half : -half);
@@ -348,7 +378,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   g.vy += GRAV;
   g.ay -= g.vy;
   let supportH = 0;
-  for (const s of SOLIDS_ALL) {
+  for (const s of g.solids) {
     if (Math.abs(g.wx - s.wx) < s.w / 2 + PLAYER_W / 2 - 6 && prevAy >= s.h - 2) {
       supportH = Math.max(supportH, s.h);
     }
@@ -499,6 +529,7 @@ function startNextWave(g: GS) {
   g.spawnQ = plan.initial;
   g.spawnMarks = plan.marks;
   g.cpBurst = plan.burst;
+  g.solids = genRoundSolids(g.wave, g.roundStart);
   g.spawnT = 800;
   g.waveMsg = 2500;
   g.dvds = [];
@@ -550,6 +581,43 @@ function doAttack(g: GS) {
   }
   if (hitCount > 0) playSfx('hit');
 }
+
+// ── Background themes ──────────────────────────────────────────────────────────
+// Rotates after every boss fight (every 3rd wave): night → day → sunset → dawn
+interface Theme {
+  skyTop: string; skyBot: string; ground: string; groundTop: string;
+  tree: string; city: string; hill: string;
+  glowA: string; glowB: string; glowC: string;
+  orb: string; orbGlow: string;   // moon or sun
+  day: boolean;                    // day themes hide stars & neon glow
+}
+const THEMES: Theme[] = [
+  { // Night city (original)
+    skyTop: '#08060A', skyBot: '#100E18', ground: '#1A0A00', groundTop: '#2A1A04',
+    tree: '#06080A', city: '#15101C', hill: '#0C1008',
+    glowA: '#6A2C10', glowB: '#93401A', glowC: '#C05A18',
+    orb: '#C8A050', orbGlow: '#D4C060', day: false,
+  },
+  { // Overcast day — washed-out apocalypse daylight
+    skyTop: '#8FA3B0', skyBot: '#C2CDD2', ground: '#4A3A22', groundTop: '#6A5432',
+    tree: '#3A4438', city: '#5E6B74', hill: '#55604E',
+    glowA: '#D8D2B8', glowB: '#E2DCC2', glowC: '#EAE4CA',
+    orb: '#F2E8C8', orbGlow: '#FFF8D8', day: true,
+  },
+  { // Blood sunset
+    skyTop: '#2A0E14', skyBot: '#5E1A18', ground: '#241004', groundTop: '#3A2008',
+    tree: '#180A0C', city: '#2E1218', hill: '#221010',
+    glowA: '#8A2A10', glowB: '#C04A14', glowC: '#F07020',
+    orb: '#FF7A30', orbGlow: '#FF9A50', day: false,
+  },
+  { // Sickly green dawn
+    skyTop: '#0E1810', skyBot: '#22301E', ground: '#141A08', groundTop: '#28300E',
+    tree: '#0A120A', city: '#182014', hill: '#12200E',
+    glowA: '#3A5A20', glowB: '#587A2A', glowC: '#7A9A38',
+    orb: '#D8E890', orbGlow: '#E8F8B0', day: false,
+  },
+];
+const themeForWave = (w: number) => THEMES[Math.floor((w - 1) / 3) % THEMES.length];
 
 // ── Background constants ───────────────────────────────────────────────────────
 const TREES = Array.from({ length: 70 }, (_, i) => ({
@@ -764,6 +832,7 @@ export default function GameScreen() {
     return sx > -90 && sx < SW + 90;
   });
 
+  const T = themeForWave(g.wave);
   const isKetchupActive = g.activePowerup === 'ketchup';
   const isChiliActive = g.activePowerup === 'chili';
   const micActive = g.micT > 0;
@@ -782,22 +851,25 @@ export default function GameScreen() {
     : C.atkBtnBorder;
 
   return (
-    <View style={[st.root, { backgroundColor: C.skyTop }]}>
+    <View style={[st.root, { backgroundColor: T.skyTop }]}>
 
       {/* ── Sky ── */}
-      <View style={[st.sky, { height: groundY, backgroundColor: C.skyBot }]}>
-        {STARS.map((star, i) => (
+      <View style={[st.sky, { height: groundY, backgroundColor: T.skyBot }]}>
+        {!T.day && STARS.map((star, i) => (
           <View key={i} style={{
             position: 'absolute', left: star.x, top: star.y + topOff + HUD_H,
             width: star.r * 2, height: star.r * 2, borderRadius: star.r,
             backgroundColor: C.starCol,
           }} />
         ))}
-        <View style={[st.moon, { top: topOff + HUD_H + 18, right: 55 }]} />
-        {/* Sunset horizon glow — burnt orange bands like the comic panels */}
-        <View style={{ position: 'absolute', left: 0, right: 0, bottom: GROUND_H, height: 100, backgroundColor: '#6A2C10', opacity: 0.18 }} />
-        <View style={{ position: 'absolute', left: 0, right: 0, bottom: GROUND_H, height: 58, backgroundColor: '#93401A', opacity: 0.20 }} />
-        <View style={{ position: 'absolute', left: 0, right: 0, bottom: GROUND_H, height: 26, backgroundColor: '#C05A18', opacity: 0.18 }} />
+        <View style={[st.moon, {
+          top: topOff + HUD_H + 18, right: 55,
+          backgroundColor: T.orb, shadowColor: T.orbGlow,
+        }]} />
+        {/* Horizon glow bands — colors follow the current theme */}
+        <View style={{ position: 'absolute', left: 0, right: 0, bottom: GROUND_H, height: 100, backgroundColor: T.glowA, opacity: 0.18 }} />
+        <View style={{ position: 'absolute', left: 0, right: 0, bottom: GROUND_H, height: 58, backgroundColor: T.glowB, opacity: 0.20 }} />
+        <View style={{ position: 'absolute', left: 0, right: 0, bottom: GROUND_H, height: 26, backgroundColor: T.glowC, opacity: 0.18 }} />
         {/* Ruined city skyline (far parallax) */}
         {CITY.map((b, i) => {
           const sx = SW / 2 + (b.wx - g.wx) * 0.22 - b.w / 2;
@@ -806,14 +878,14 @@ export default function GameScreen() {
             <View key={`c${i}`} style={{ position: 'absolute', left: sx, bottom: GROUND_H - 2, width: b.w, height: b.h }}>
               <View style={{
                 position: 'absolute', left: 0, bottom: 0, width: b.w, height: b.h,
-                backgroundColor: C.cityCol,
+                backgroundColor: T.city,
                 borderTopLeftRadius: b.broken ? 0 : 2,
                 borderTopRightRadius: b.broken ? 10 : 2,
               }} />
               {b.broken && (
                 <View style={{
                   position: 'absolute', left: b.w * 0.55, bottom: b.h - 8, width: b.w * 0.45, height: 8,
-                  backgroundColor: C.skyTop,
+                  backgroundColor: T.skyBot,
                 }} />
               )}
               {/* Dim lit windows */}
@@ -850,14 +922,14 @@ export default function GameScreen() {
             </View>
           );
         })}
-        <View style={[st.hill, { bottom: GROUND_H, left: -20, width: SW * 0.55, height: 70 }]} />
-        <View style={[st.hill, { bottom: GROUND_H, left: SW * 0.38, width: SW * 0.65, height: 50 }]} />
+        <View style={[st.hill, { bottom: GROUND_H, left: -20, width: SW * 0.55, height: 70, backgroundColor: T.hill }]} />
+        <View style={[st.hill, { bottom: GROUND_H, left: SW * 0.38, width: SW * 0.65, height: 50, backgroundColor: T.hill }]} />
         {visTrees.map((t, i) => {
           const sx = SW / 2 + (t.wx - g.wx) * 0.38 - t.w / 2;
           return (
             <View key={i} style={{
               position: 'absolute', left: sx, bottom: GROUND_H - 2,
-              width: t.w, height: t.h, backgroundColor: C.treeCol,
+              width: t.w, height: t.h, backgroundColor: T.tree,
               borderTopLeftRadius: t.w / 2, borderTopRightRadius: t.w / 2,
             }} />
           );
@@ -865,8 +937,8 @@ export default function GameScreen() {
       </View>
 
       {/* ── Ground ── */}
-      <View style={[st.ground, { top: groundY, height: GROUND_H, backgroundColor: C.ground }]} />
-      <View style={[st.groundTop, { top: groundY }]} />
+      <View style={[st.ground, { top: groundY, height: GROUND_H, backgroundColor: T.ground }]} />
+      <View style={[st.groundTop, { top: groundY, backgroundColor: T.groundTop }]} />
 
       {/* ── Street lights (flickering) ── */}
       {STREETLIGHTS.map((l, i) => {
@@ -909,7 +981,7 @@ export default function GameScreen() {
       })}
 
       {/* ── Floating platforms ── */}
-      {PLATFORMS.map((p, i) => {
+      {g.solids.filter(s => s.kind === 'platform').map((p, i) => {
         const sx = SW / 2 + (p.wx - g.wx);
         if (sx < -120 || sx > SW + 120) return null;
         const topY = groundY - p.h;
@@ -928,7 +1000,7 @@ export default function GameScreen() {
       })}
 
       {/* ── Ground obstacles (wrecked cars, crates, barricades) ── */}
-      {OBSTACLES.map((o, i) => {
+      {g.solids.filter(s => s.kind !== 'platform').map((o, i) => {
         const sx = SW / 2 + (o.wx - g.wx);
         if (sx < -120 || sx > SW + 120) return null;
         const lx = sx - o.w / 2;
