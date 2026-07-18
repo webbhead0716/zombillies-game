@@ -233,8 +233,16 @@ export default function MenuScreen() {
       {/* ── Title block ── */}
       <Animated.View style={[s.titleBlock, { paddingTop: topOff + 50, opacity: titleOpacity, transform: [{ translateY: titleY }] }]}>
         <View style={s.titleStack}>
-          <Animated.Text style={[s.titleGlow, { opacity: glowOpacity }]}>ZOMBILLIES</Animated.Text>
-          <Text style={s.titleMain}>ZOMBILLIES</Text>
+          <Animated.Text
+            style={[s.titleGlow, { opacity: glowOpacity }]}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+          >
+            ZOMBILLIES
+          </Animated.Text>
+          <Text style={s.titleMain} numberOfLines={1} adjustsFontSizeToFit>
+            ZOMBILLIES
+          </Text>
         </View>
         <Text style={s.tagLine1}>THE UNDEAD. THE UNREFINED.</Text>
         <Text style={s.tagLine2}>THE DVD-ARMED.</Text>
@@ -435,7 +443,7 @@ const s = StyleSheet.create({
   dvdShine: { position: 'absolute', left: 4, top: 3, width: 6, height: 3, borderRadius: 2, backgroundColor: '#FFFFFF', opacity: 0.65 },
 
   // Title
-  titleBlock: { alignItems: 'flex-start', paddingHorizontal: 22, maxWidth: SW * 0.65 },
+  titleBlock: { alignItems: 'flex-start', paddingHorizontal: 22, maxWidth: SW - 8 },
   titleStack: { position: 'relative', alignItems: 'flex-start', justifyContent: 'center' },
   titleGlow: {
     position: 'absolute', fontSize: 52, fontWeight: '900', letterSpacing: 2,
