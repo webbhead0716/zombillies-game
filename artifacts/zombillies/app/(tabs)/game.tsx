@@ -24,10 +24,13 @@ const C = {
   groundTop: '#2A1A04',
   treeCol: '#06080A',
   // Bill — comic look: black trucker cap w/ white roundel, sallow green skin
-  billCap: '#1C1B20',
-  billCapBrim: '#0E0D12',
+  billCap: '#3A2313',
+  billCapBrim: '#241206',
+  billJeans: '#1B65F5',
+  billJeansDark: '#0F47C8',
+  billBoots: '#2C1708',
   billHead: '#93A860',
-  billBeard: '#2E2418',
+  billBeard: '#33200E',
   billShirt: '#8B2020',
   billShirtDark: '#5A0A0A',
   billGlasses: '#1A1A1A',
@@ -83,7 +86,6 @@ const PLAYER_H = 52;
 const HEAD_D = 21;
 const HAT_H = 12;
 const HAT_W = 30;
-const BEARD_H = 14;
 const PLAYER_SPD = 5.5;
 const JUMP_VY = -15.5;
 const GRAV = 0.72;
@@ -487,7 +489,6 @@ export default function GameScreen() {
   const pBodyX = pCX - PLAYER_W / 2;
   const pHeadX = pCX - HEAD_D / 2;
   const pHatX = pCX - HAT_W / 2;
-  const pBeardX = pCX - (HEAD_D / 2 + 3);
 
   const flicker = g.dmgFlash > 0;
   const billHeadCol = flicker ? '#A03020' : C.billHead;
@@ -818,50 +819,26 @@ export default function GameScreen() {
           position: 'absolute', left: pHatX, top: pHatTopY + pBob,
           width: HAT_W, height: HAT_H,
           backgroundColor: C.billCap,
-          borderTopLeftRadius: 11, borderTopRightRadius: 11,
+          borderTopLeftRadius: HAT_W / 2, borderTopRightRadius: HAT_W / 2,
           borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
           opacity: pOpacity,
         }} />
-        {/* Crown mesh panel (back half, slightly darker) */}
+        {/* White dot logo — offset toward the brim side */}
         <View style={{
           position: 'absolute',
-          left: g.faceR ? pHatX : pHatX + HAT_W / 2,
-          top: pHatTopY + pBob,
-          width: HAT_W / 2, height: HAT_H,
-          backgroundColor: '#34333C',
-          borderTopLeftRadius: g.faceR ? 0 : 11,
-          borderTopRightRadius: g.faceR ? 11 : 0,
-          borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
-          opacity: pOpacity * 0.55,
+          left: g.faceR ? pCX + 5 : pCX - 11,
+          top: pHatTopY + 3 + pBob,
+          width: 6, height: 6, borderRadius: 3,
+          backgroundColor: '#F2EFE6', opacity: pOpacity,
         }} />
-        {/* Logo patch — white roundel like the comic cap */}
-        <View style={{
-          position: 'absolute', left: pCX - 4.5, top: pHatTopY + 2.5 + pBob,
-          width: 9, height: 9, borderRadius: 4.5,
-          backgroundColor: '#E8E4D8', opacity: pOpacity,
-        }} />
-        <View style={{
-          position: 'absolute', left: pCX - 2, top: pHatTopY + 5 + pBob,
-          width: 4, height: 4, borderRadius: 2,
-          backgroundColor: '#8B1A00', opacity: pOpacity,
-        }} />
-        {/* Button on top */}
-        <View style={{
-          position: 'absolute', left: pCX - 2.5, top: pHatTopY + 1 + pBob,
-          width: 5, height: 4, borderRadius: 2,
-          backgroundColor: C.billCapBrim, opacity: pOpacity,
-        }} />
-        {/* Flat visor brim — directional */}
+        {/* Slim visor brim — directional */}
         <View style={{
           position: 'absolute',
-          left: g.faceR ? pCX + 8 : pCX - 28,
-          top: pHatBrimY + 2 + pBob,
-          width: 20, height: 5,
+          left: g.faceR ? pCX + 8 : pCX - 30,
+          top: pHatBrimY + 3 + pBob,
+          width: 22, height: 3.5,
           backgroundColor: C.billCapBrim,
-          borderTopLeftRadius: g.faceR ? 0 : 3,
-          borderTopRightRadius: g.faceR ? 3 : 0,
-          borderBottomLeftRadius: g.faceR ? 2 : 4,
-          borderBottomRightRadius: g.faceR ? 4 : 2,
+          borderRadius: 2,
           opacity: pOpacity,
         }} />
         {/* Head */}
@@ -870,67 +847,74 @@ export default function GameScreen() {
           width: HEAD_D, height: HEAD_D,
           borderRadius: HEAD_D / 2, backgroundColor: billHeadCol, opacity: pOpacity,
         }} />
-        {/* Glasses left */}
+        {/* Glasses left — chunky dark rounded frame */}
         <View style={{
-          position: 'absolute', left: pHeadX + 1, top: pHeadY + 9 + pBob,
-          width: 7, height: 5, borderRadius: 2,
-          borderWidth: 1.5, borderColor: C.billGlasses,
-          backgroundColor: 'rgba(0,0,0,0.35)', opacity: pOpacity,
+          position: 'absolute', left: pHeadX, top: pHeadY + 8 + pBob,
+          width: 8, height: 6, borderRadius: 2.5,
+          borderWidth: 2, borderColor: C.billGlasses,
+          backgroundColor: 'rgba(40,50,20,0.6)', opacity: pOpacity,
         }} />
         {/* Glasses right */}
         <View style={{
-          position: 'absolute', left: pHeadX + 11, top: pHeadY + 9 + pBob,
-          width: 7, height: 5, borderRadius: 2,
-          borderWidth: 1.5, borderColor: C.billGlasses,
-          backgroundColor: 'rgba(0,0,0,0.35)', opacity: pOpacity,
+          position: 'absolute', left: pHeadX + 13, top: pHeadY + 8 + pBob,
+          width: 8, height: 6, borderRadius: 2.5,
+          borderWidth: 2, borderColor: C.billGlasses,
+          backgroundColor: 'rgba(40,50,20,0.6)', opacity: pOpacity,
         }} />
-        {/* Glasses bridge */}
+        {/* Glasses bridge — thick bar */}
         <View style={{
-          position: 'absolute', left: pHeadX + 8, top: pHeadY + 11 + pBob,
-          width: 3, height: 1.5, backgroundColor: C.billGlasses, opacity: pOpacity,
+          position: 'absolute', left: pHeadX + 7, top: pHeadY + 10 + pBob,
+          width: 7, height: 2.5, backgroundColor: C.billGlasses, opacity: pOpacity,
         }} />
-        {/* Long beard — wide top section (at chin) */}
-        <View style={{
-          position: 'absolute', left: pBeardX, top: pBeardY + pBob,
-          width: HEAD_D + 6, height: 13,
-          backgroundColor: C.billBeard, opacity: pOpacity,
-        }} />
-        {/* Long beard — middle section */}
-        <View style={{
-          position: 'absolute', left: pBeardX + 3, top: pBeardY + 12 + pBob,
-          width: HEAD_D, height: 14,
-          backgroundColor: C.billBeard, opacity: pOpacity,
-        }} />
-        {/* Long beard — tapered tip */}
-        <View style={{
-          position: 'absolute', left: pCX - 8, top: pBeardY + 25 + pBob,
-          width: 16, height: 18,
-          borderBottomLeftRadius: 8, borderBottomRightRadius: 8,
-          backgroundColor: C.billBeard, opacity: pOpacity,
-        }} />
-        {/* Shirt body */}
+        {/* Shirt body (upper torso) */}
         <View style={{
           position: 'absolute', left: pBodyX, top: pBodyY + pBob,
-          width: PLAYER_W, height: PLAYER_H,
-          backgroundColor: billShirtCol, borderRadius: 5, opacity: pOpacity,
+          width: PLAYER_W, height: PLAYER_H * 0.52,
+          backgroundColor: billShirtCol,
+          borderTopLeftRadius: 5, borderTopRightRadius: 5,
+          opacity: pOpacity,
         }} />
-        {/* Plaid H */}
+        {/* Plaid H band */}
         <View style={{
-          position: 'absolute', left: pBodyX, top: pBodyY + PLAYER_H / 3 + pBob,
-          width: PLAYER_W, height: 4, backgroundColor: C.billShirtDark, opacity: pOpacity * 0.55,
-        }} />
-        <View style={{
-          position: 'absolute', left: pBodyX, top: pBodyY + PLAYER_H * 0.65 + pBob,
+          position: 'absolute', left: pBodyX, top: pBodyY + PLAYER_H * 0.3 + pBob,
           width: PLAYER_W, height: 4, backgroundColor: C.billShirtDark, opacity: pOpacity * 0.55,
         }} />
         {/* Plaid V */}
         <View style={{
-          position: 'absolute', left: pBodyX + PLAYER_W / 3, top: pBodyY + pBob,
-          width: 3, height: PLAYER_H, backgroundColor: C.billShirtDark, opacity: pOpacity * 0.45,
+          position: 'absolute', left: pBodyX + PLAYER_W / 4, top: pBodyY + pBob,
+          width: 3, height: PLAYER_H * 0.52, backgroundColor: C.billShirtDark, opacity: pOpacity * 0.45,
         }} />
         <View style={{
-          position: 'absolute', left: pBodyX + PLAYER_W * 0.68, top: pBodyY + pBob,
-          width: 3, height: PLAYER_H, backgroundColor: C.billShirtDark, opacity: pOpacity * 0.45,
+          position: 'absolute', left: pBodyX + PLAYER_W * 0.72, top: pBodyY + pBob,
+          width: 3, height: PLAYER_H * 0.52, backgroundColor: C.billShirtDark, opacity: pOpacity * 0.45,
+        }} />
+        {/* Blue jeans (lower body) */}
+        <View style={{
+          position: 'absolute', left: pBodyX, top: pBodyY + PLAYER_H * 0.52 + pBob,
+          width: PLAYER_W, height: PLAYER_H * 0.48,
+          backgroundColor: flicker ? C.blood : C.billJeans, opacity: pOpacity,
+        }} />
+        {/* Jeans center seam */}
+        <View style={{
+          position: 'absolute', left: pCX - 1.5, top: pBodyY + PLAYER_H * 0.62 + pBob,
+          width: 3, height: PLAYER_H * 0.38,
+          backgroundColor: C.billJeansDark, opacity: pOpacity * 0.8,
+        }} />
+        {/* Boots */}
+        <View style={{
+          position: 'absolute', left: pBodyX - 2, top: pBodyY + PLAYER_H - 2 + pBob,
+          width: PLAYER_W + 4, height: 6,
+          borderRadius: 3, backgroundColor: C.billBoots, opacity: pOpacity,
+        }} />
+        {/* Big triangular beard — over the chest like the comic */}
+        <View style={{
+          position: 'absolute', left: pCX - (HEAD_D / 2 + 4), top: pBeardY + pBob,
+          width: 0, height: 0,
+          borderLeftWidth: HEAD_D / 2 + 4, borderRightWidth: HEAD_D / 2 + 4,
+          borderTopWidth: 30,
+          borderLeftColor: 'transparent', borderRightColor: 'transparent',
+          borderStyle: 'solid',
+          borderTopColor: C.billBeard, opacity: pOpacity,
         }} />
         {/* Throwing arm */}
         {g.atkActive && (
