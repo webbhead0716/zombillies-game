@@ -42,3 +42,9 @@ id = "_-T0A0aAFMGylJe51dmPc"
 uri = "file://artifacts/zombillies/assets/audio/music_rockabilly.mp3"
 type = "audio"
 title = "rockabilly powerup loop"
+
+[[outputs]]
+id = "4NjSX1wv4UYNo-Rbi2CCu"
+uri = "file://artifacts/zombillies/assets/audio/music_rockabilly_2.mp3"
+type = "audio"
+title = "banjo rock loop"

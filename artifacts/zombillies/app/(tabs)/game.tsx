@@ -136,7 +136,7 @@ const HS_KEY = 'zb_hs';
 const POWERUP_PICKUP_R = 38;     // pickup radius (world px)
 const POWERUP_FIRST_SPAWN = 10000;
 const POWERUP_RESPAWN = 18000;
-const MIC_DURATION = 9000;       // mic mode: timed invincibility + speed
+const MIC_DURATION = 30000;      // mic mode: timed invincibility + speed
 const MIC_SPEED_MULT = 1.75;
 
 // ── Platforms & obstacles (world space) ──────────────────────────────────────
