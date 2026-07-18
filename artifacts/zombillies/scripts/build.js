@@ -521,6 +521,20 @@ function updateManifests(manifests, timestamp, baseUrl, assetsByHash) {
   console.log('Manifests updated');
 }
 
+function buildWebExport() {
+  console.log('Exporting web build (playable in browser)...');
+  const { spawnSync } = require('child_process');
+  const result = spawnSync(
+    'pnpm',
+    ['exec', 'expo', 'export', '--platform', 'web', '--output-dir', 'static-build/web'],
+    { cwd: projectRoot, stdio: 'inherit', env: { ...process.env } },
+  );
+  if (result.status !== 0) {
+    exitWithError('Web export failed');
+  }
+  console.log('Web build ready');
+}
+
 async function main() {
   console.log('Building static Expo Go deployment...');
 
@@ -572,11 +586,14 @@ async function main() {
   console.log('Updating manifests and creating landing page...');
   updateManifests(manifests, timestamp, baseUrl, assetsByHash);
 
-  console.log('Build complete! Deploy to:', baseUrl);
-
   if (metroProcess) {
     metroProcess.kill();
+    metroProcess = null;
   }
+
+  buildWebExport();
+
+  console.log('Build complete! Deploy to:', baseUrl);
   process.exit(0);
 }
 

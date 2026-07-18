@@ -81,27 +81,45 @@ function serveLandingPage(req, res, landingPageTemplate, appName) {
   res.end(html);
 }
 
-function serveStaticFile(urlPath, res) {
+const WEB_ROOT = path.join(STATIC_ROOT, 'web');
+
+function resolveFile(root, urlPath) {
   const safePath = path.normalize(urlPath).replace(/^(\.\.(\/|\\|$))+/, '');
-  const filePath = path.join(STATIC_ROOT, safePath);
-
-  if (!filePath.startsWith(STATIC_ROOT)) {
-    res.writeHead(403);
-    res.end('Forbidden');
-    return;
-  }
-
+  const filePath = path.join(root, safePath);
+  if (!filePath.startsWith(root)) return null;
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    res.writeHead(404);
-    res.end('Not Found');
-    return;
+    return null;
   }
+  return filePath;
+}
 
+function sendFile(filePath, res) {
   const ext = path.extname(filePath).toLowerCase();
   const contentType = MIME_TYPES[ext] || 'application/octet-stream';
   const content = fs.readFileSync(filePath);
   res.writeHead(200, { 'content-type': contentType });
   res.end(content);
+}
+
+function serveStaticFile(urlPath, res) {
+  // Native bundle/asset paths live directly under static-build; web build
+  // assets live under static-build/web. Try both.
+  const filePath =
+    resolveFile(STATIC_ROOT, urlPath) || resolveFile(WEB_ROOT, urlPath);
+
+  if (filePath) {
+    return sendFile(filePath, res);
+  }
+
+  // SPA fallback: extensionless routes (e.g. /game) get the web app shell
+  // so expo-router can handle client-side routing.
+  const webIndex = path.join(WEB_ROOT, 'index.html');
+  if (!path.extname(urlPath) && fs.existsSync(webIndex)) {
+    return sendFile(webIndex, res);
+  }
+
+  res.writeHead(404);
+  res.end('Not Found');
 }
 
 const landingPageTemplate = fs.readFileSync(TEMPLATE_PATH, 'utf-8');
@@ -122,8 +140,18 @@ const server = http.createServer((req, res) => {
     }
 
     if (pathname === '/') {
+      // Browsers get the playable web game when a web build exists;
+      // the QR/Expo Go landing page stays available at /expo.
+      const webIndex = path.join(WEB_ROOT, 'index.html');
+      if (fs.existsSync(webIndex)) {
+        return sendFile(webIndex, res);
+      }
       return serveLandingPage(req, res, landingPageTemplate, appName);
     }
+  }
+
+  if (pathname === '/expo') {
+    return serveLandingPage(req, res, landingPageTemplate, appName);
   }
 
   serveStaticFile(pathname, res);
