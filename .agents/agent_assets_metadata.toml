@@ -1,0 +1,38 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "tpND1GcH2xbHRuTGF-QKC"
+uri = "file://artifacts/zombillies/assets/audio/sfx_gameover.mp3"
+type = "audio"
+title = "game over"
+
+[[outputs]]
+id = "NndoHM9KNSoxlUq6Dl8Y_"
+uri = "file://artifacts/zombillies/assets/audio/sfx_powerup.mp3"
+type = "audio"
+title = "powerup"
+
+[[outputs]]
+id = "AVmBbkz2_I0hpFcwLCQcE"
+uri = "file://artifacts/zombillies/assets/audio/sfx_hit.mp3"
+type = "audio"
+title = "zombie hit"
+
+[[outputs]]
+id = "6K9o3AZfJRpE-8w7cnvzY"
+uri = "file://artifacts/zombillies/assets/audio/sfx_throw.mp3"
+type = "audio"
+title = "throw"
+
+[[outputs]]
+id = "HTVx0ft4fFu0bh0CQY9RP"
+uri = "file://artifacts/zombillies/assets/audio/sfx_hurt.mp3"
+type = "audio"
+title = "hurt"
+
+[[outputs]]
+id = "_jgk6SoIymbhs-wWi8rxL"
+uri = "file://artifacts/zombillies/assets/audio/music_bluegrass.mp3"
+type = "audio"
+title = "spooky bluegrass loop"

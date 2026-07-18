@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { playSfx, startMusic, stopMusic, disposeAudio } from '../../lib/sound';
 import {
   View,
   Text,
@@ -257,6 +258,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
       // Picked up
       g.activePowerup = p.type;
       g.powerupT = POWERUP_DURATION;
+      playSfx('powerup');
     } else {
       remaining.push(p);
     }
@@ -287,7 +289,8 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
       g.iframeT = IFRAME_DUR;
       g.dmgFlash = 280;
       e.atkCd = ENEMY_ATK_CD;
-      if (g.hp <= 0) { g.hp = 0; g.phase = 'dead'; return; }
+      if (g.hp <= 0) { g.hp = 0; g.phase = 'dead'; playSfx('gameover'); return; }
+      playSfx('hurt');
     }
     keepE.push(e);
   }
@@ -337,6 +340,7 @@ function doAttack(g: GS) {
   } else {
     g.dvds.push({ id: `d${++g.nextId}`, wx: g.wx + dir * 18, dir, t: 0, yOff: 0 });
   }
+  playSfx('throw');
 
   // Hit enemies in range
   let hitCount = 0;
@@ -351,6 +355,7 @@ function doAttack(g: GS) {
       if (e.hp <= 0) { e.dead = true; e.fade = 1; g.score += SCORE_PER_KILL; }
     }
   }
+  if (hitCount > 0) playSfx('hit');
 }
 
 // ── Background constants ───────────────────────────────────────────────────────
@@ -435,6 +440,16 @@ export default function GameScreen() {
     const id = setInterval(tickFn, TICK_MS);
     return () => clearInterval(id);
   }, [tickFn]);
+
+  // Background music for the whole run; release all players on unmount
+  useEffect(() => {
+    startMusic();
+    return () => disposeAudio();
+  }, []);
+
+  useEffect(() => {
+    if (isDead) stopMusic();
+  }, [isDead]);
 
   useEffect(() => {
     if (!isDead) return;
@@ -641,56 +656,125 @@ export default function GameScreen() {
         );
       })}
 
-      {/* ── Flying DVDs ── */}
+      {/* ── Projectiles (DVD / Ketchup bottle / Chili bowl) ── */}
       {g.dvds.map(dvd => {
         const screenX = SW / 2 + (dvd.wx - g.wx);
         const prog = dvd.t / DVD_LIFETIME;
-        const rot = dvd.dir * prog * 720;
         const dvdY = pBodyY + 18 + dvd.yOff;
-        if (screenX < -20 || screenX > SW + 20) return null;
+        if (screenX < -40 || screenX > SW + 40) return null;
+        const opacity = Math.max(0, 1 - prog * 0.6);
+        const rot = dvd.dir * prog * 720;
+
+        if (isKetchupActive) {
+          // Flying ketchup bottle
+          return (
+            <View key={dvd.id} pointerEvents="none" style={{
+              position: 'absolute', left: screenX - 8, top: dvdY - 8,
+              opacity, transform: [{ rotate: `${dvd.dir * prog * 280}deg` }],
+              alignItems: 'center',
+            }}>
+              {/* Cap */}
+              <View style={{ width: 8, height: 4, backgroundColor: '#AA1000', borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
+              {/* Neck */}
+              <View style={{ width: 5, height: 5, backgroundColor: '#CC2200' }} />
+              {/* Shoulder */}
+              <View style={{ width: 14, height: 4, backgroundColor: '#DD2200', borderRadius: 2 }} />
+              {/* Body */}
+              <View style={{ width: 14, height: 16, backgroundColor: '#DD2200', borderRadius: 3, alignItems: 'center', justifyContent: 'center' }}>
+                <View style={{ width: 10, height: 2, backgroundColor: '#F0DDD8', borderRadius: 1, marginBottom: 2 }} />
+                <View style={{ width: 7, height: 2, backgroundColor: '#F0DDD8', borderRadius: 1 }} />
+              </View>
+              {/* Base */}
+              <View style={{ width: 12, height: 3, backgroundColor: '#AA1800', borderBottomLeftRadius: 3, borderBottomRightRadius: 3 }} />
+            </View>
+          );
+        }
+
+        if (isChiliActive) {
+          // Flying chili bowl
+          return (
+            <View key={dvd.id} pointerEvents="none" style={{
+              position: 'absolute', left: screenX - 14, top: dvdY - 10,
+              opacity,
+            }}>
+              {/* Steam wisps */}
+              <View style={{ flexDirection: 'row', justifyContent: 'space-around', width: 28, paddingHorizontal: 3, marginBottom: 1 }}>
+                <View style={{ width: 2, height: 5 + (prog > 0.3 ? 0 : 3), backgroundColor: '#C09870', borderRadius: 1, opacity: 0.8 }} />
+                <View style={{ width: 2, height: 8 + (prog > 0.3 ? 0 : 2), backgroundColor: '#C09870', borderRadius: 1, opacity: 0.8 }} />
+                <View style={{ width: 2, height: 5 + (prog > 0.3 ? 0 : 3), backgroundColor: '#C09870', borderRadius: 1, opacity: 0.8 }} />
+              </View>
+              {/* Chili surface */}
+              <View style={{ width: 28, height: 7, backgroundColor: '#CC4400', borderRadius: 5 }} />
+              {/* Bowl body */}
+              <View style={{ width: 28, height: 13, backgroundColor: '#8B3A00', borderBottomLeftRadius: 9, borderBottomRightRadius: 9 }} />
+              {/* Pepper dot */}
+              <View style={{ position: 'absolute', left: 7, top: 8, width: 5, height: 5, borderRadius: 2.5, backgroundColor: '#FF2200', opacity: 0.85 }} />
+            </View>
+          );
+        }
+
+        // Default: spinning DVD
         return (
-          <View key={dvd.id} style={{
-            position: 'absolute',
-            left: screenX - 11, top: dvdY,
-            width: 22, height: 22,
-            borderRadius: 11,
-            backgroundColor: isKetchupActive ? '#E88080' : C.dvdSilver,
+          <View key={dvd.id} pointerEvents="none" style={{
+            position: 'absolute', left: screenX - 11, top: dvdY,
+            width: 22, height: 22, borderRadius: 11,
+            backgroundColor: C.dvdSilver,
             borderWidth: 2.5, borderColor: C.dvdShine,
-            opacity: Math.max(0, 1 - prog * 0.65),
-            transform: [{ rotate: `${rot}deg` }],
-          }} pointerEvents="none">
-            <View style={{
-              position: 'absolute', left: 6, top: 6,
-              width: 8, height: 8, borderRadius: 4, backgroundColor: C.dvdHole,
-            }} />
-            <View style={{
-              position: 'absolute', left: 3, top: 2,
-              width: 5, height: 2, borderRadius: 1,
-              backgroundColor: '#FFFFFF', opacity: 0.7,
-            }} />
+            opacity, transform: [{ rotate: `${rot}deg` }],
+          }}>
+            <View style={{ position: 'absolute', left: 6, top: 6, width: 8, height: 8, borderRadius: 4, backgroundColor: C.dvdHole }} />
+            <View style={{ position: 'absolute', left: 3, top: 2, width: 5, height: 2, borderRadius: 1, backgroundColor: '#FFF', opacity: 0.7 }} />
           </View>
         );
       })}
 
       {/* ── Bill (player) ── */}
       <View style={StyleSheet.absoluteFill} pointerEvents="none">
-        {/* Hat top */}
+        {/* Baseball trucker cap — crown */}
         <View style={{
           position: 'absolute', left: pHatX, top: pHatTopY + pBob,
           width: HAT_W, height: HAT_H,
           backgroundColor: C.billCap,
-          borderTopLeftRadius: 6, borderTopRightRadius: 6, opacity: pOpacity,
+          borderTopLeftRadius: 11, borderTopRightRadius: 11,
+          borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
+          opacity: pOpacity,
         }} />
-        {/* Hat brim */}
+        {/* Crown mesh panel (back half, slightly darker) */}
         <View style={{
-          position: 'absolute', left: pHatX - 6, top: pHatBrimY + pBob,
-          width: HAT_W + 12, height: 5,
-          backgroundColor: C.billCapBrim, borderRadius: 2, opacity: pOpacity,
+          position: 'absolute',
+          left: g.faceR ? pHatX : pHatX + HAT_W / 2,
+          top: pHatTopY + pBob,
+          width: HAT_W / 2, height: HAT_H,
+          backgroundColor: '#4A3A18',
+          borderTopLeftRadius: g.faceR ? 0 : 11,
+          borderTopRightRadius: g.faceR ? 11 : 0,
+          borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
+          opacity: pOpacity * 0.55,
         }} />
-        {/* Cap logo dot */}
+        {/* Logo patch */}
         <View style={{
-          position: 'absolute', left: pCX - 3, top: pHatTopY + 3 + pBob,
-          width: 6, height: 6, borderRadius: 3, backgroundColor: '#8B1A00', opacity: pOpacity,
+          position: 'absolute', left: pCX - 5, top: pHatTopY + 3 + pBob,
+          width: 10, height: 6, borderRadius: 2,
+          backgroundColor: '#8B1A00', opacity: pOpacity * 0.9,
+        }} />
+        {/* Button on top */}
+        <View style={{
+          position: 'absolute', left: pCX - 2.5, top: pHatTopY + 1 + pBob,
+          width: 5, height: 4, borderRadius: 2,
+          backgroundColor: C.billCapBrim, opacity: pOpacity,
+        }} />
+        {/* Flat visor brim — directional */}
+        <View style={{
+          position: 'absolute',
+          left: g.faceR ? pCX + 8 : pCX - 28,
+          top: pHatBrimY + 2 + pBob,
+          width: 20, height: 5,
+          backgroundColor: C.billCapBrim,
+          borderTopLeftRadius: g.faceR ? 0 : 3,
+          borderTopRightRadius: g.faceR ? 3 : 0,
+          borderBottomLeftRadius: g.faceR ? 2 : 4,
+          borderBottomRightRadius: g.faceR ? 4 : 2,
+          opacity: pOpacity,
         }} />
         {/* Head */}
         <View style={{
@@ -717,12 +801,24 @@ export default function GameScreen() {
           position: 'absolute', left: pHeadX + 8, top: pHeadY + 11 + pBob,
           width: 3, height: 1.5, backgroundColor: C.billGlasses, opacity: pOpacity,
         }} />
-        {/* Beard */}
+        {/* Long beard — wide top section (at chin) */}
         <View style={{
           position: 'absolute', left: pBeardX, top: pBeardY + pBob,
-          width: HEAD_D + 6, height: BEARD_H,
-          backgroundColor: C.billBeard,
-          borderBottomLeftRadius: 7, borderBottomRightRadius: 7, opacity: pOpacity,
+          width: HEAD_D + 6, height: 13,
+          backgroundColor: C.billBeard, opacity: pOpacity,
+        }} />
+        {/* Long beard — middle section */}
+        <View style={{
+          position: 'absolute', left: pBeardX + 3, top: pBeardY + 12 + pBob,
+          width: HEAD_D, height: 14,
+          backgroundColor: C.billBeard, opacity: pOpacity,
+        }} />
+        {/* Long beard — tapered tip */}
+        <View style={{
+          position: 'absolute', left: pCX - 8, top: pBeardY + 25 + pBob,
+          width: 16, height: 18,
+          borderBottomLeftRadius: 8, borderBottomRightRadius: 8,
+          backgroundColor: C.billBeard, opacity: pOpacity,
         }} />
         {/* Shirt body */}
         <View style={{
