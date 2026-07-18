@@ -407,8 +407,9 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     const eReach = e.boss ? ENEMY_ATK_RANGE + 16 : ENEMY_ATK_RANGE;
     if (dist > eReach - 4) { e.wx += dir * eSpd; e.step += TICK_MS; }
 
-    // Mic mode: any zombie that touches Bill gets fried instantly
-    if (g.micT > 0 && dist < eReach + 4) {
+    // Mic mode: any regular zombie that touches Bill gets fried instantly.
+    // Bosses are immune to the touch-kill — they must be damaged with weapons.
+    if (g.micT > 0 && !e.boss && dist < eReach + 4) {
       e.dead = true; e.fade = 1;
       g.score += e.boss ? BOSS_SCORE : SCORE_PER_KILL;
       g.kills++; g.roundKills++;
