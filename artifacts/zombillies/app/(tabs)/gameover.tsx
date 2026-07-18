@@ -30,12 +30,16 @@ export default function GameOverScreen() {
     wave: string;
     hs: string;
     newHs: string;
+    kills: string;
+    hits: string;
   }>();
 
   const score = parseInt(params.score ?? '0');
   const wave = parseInt(params.wave ?? '1');
   const hs = parseInt(params.hs ?? '0');
   const isNewHs = params.newHs === '1';
+  const kills = parseInt(params.kills ?? '0');
+  const hits = parseInt(params.hits ?? '0');
 
   const topOff = insets.top + WEB_TOP;
   const botOff = insets.bottom + WEB_BOT;
@@ -118,6 +122,18 @@ export default function GameOverScreen() {
           <View style={s.divider} />
 
           <View style={s.statRow}>
+            <Text style={s.statLabel}>ZOMBIES KILLED</Text>
+            <Text style={s.statVal}>{kills}</Text>
+          </View>
+
+          <View style={s.statRow}>
+            <Text style={s.statLabel}>HITS TAKEN</Text>
+            <Text style={s.statVal}>{hits}</Text>
+          </View>
+
+          <View style={s.divider} />
+
+          <View style={s.statRow}>
             <Text style={s.statLabel}>SCORE</Text>
             <Text style={s.statValBig}>{score.toLocaleString()}</Text>
           </View>
@@ -164,7 +180,7 @@ export default function GameOverScreen() {
           <Pressable
             style={({ pressed }) => [s.menuBtn, pressed && s.menuBtnPressed]}
             onPress={() => {
-              router.replace('/(tabs)/');
+              router.replace('/(tabs)');
             }}
           >
             <Ionicons name="home" size={18} color="rgba(255,255,255,0.6)" />

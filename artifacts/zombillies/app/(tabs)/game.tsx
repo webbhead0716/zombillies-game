@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { playSfx, startMusic, stopMusic, switchMusic, disposeAudio } from '../../lib/sound';
+import { playSfx, startMusic, stopMusic, switchMusic, disposeAudio, setMuted, getMuted } from '../../lib/sound';
 import {
   View,
   Text,
@@ -134,6 +134,24 @@ const ENEMY_ATK_RANGE = 44;
 const ENEMY_DMG = 12;
 const ENEMY_ATK_CD = 1600;
 
+// Zombie variety — 0: shambler (baseline), 1: tank (slow, beefy), 2: runner (fast, frail)
+const ETYPE_STATS = [
+  { spd: 2.0, hp: 80, dmg: 12, scale: 1 },
+  { spd: 1.25, hp: 160, dmg: 20, scale: 1.16 },
+  { spd: 3.1, hp: 45, dmg: 8, scale: 0.92 },
+] as const;
+// Zombies get slightly stronger every wave
+const waveHpMult = (w: number) => 1 + (w - 1) * 0.06;
+const waveSpdBoost = (w: number) => Math.min((w - 1) * 0.05, 1.0);
+
+// Weapon progression — DVDs sharpen every boss cycle; vinyls unlock at wave 5
+const dvdDmgForWave = (w: number) => ATTACK_DMG + Math.floor((w - 1) / 3) * 8;
+const VINYL_UNLOCK_WAVE = 5;
+const VINYL_EVERY = 3;          // every 3rd throw is a vinyl record
+const VINYL_DMG_MULT = 1.6;
+const VINYL_RANGE = SW * 0.95;  // vinyls fly nearly full-screen
+const COMBO_BONUS = 50;         // extra points per additional kill in one throw
+
 // Scoring / waves
 const SCORE_PER_KILL = 100;
 const WAVE_BONUS = 500;
@@ -221,6 +239,10 @@ interface Enemy {
   fade: number;
   step: number;
   boss: boolean;
+  charger: boolean; // boss variant: bursts of speed
+  spd: number;
+  dmg: number;
+  scale: number;
 }
 
 interface DVDProj {
@@ -229,6 +251,7 @@ interface DVDProj {
   dir: number;
   t: number;
   yOff: number;   // screen-Y offset from body center (for spread)
+  vinyl?: boolean; // vinyl record: bigger, harder, flies further
 }
 
 interface HitEffect {
@@ -246,7 +269,7 @@ interface Powerup {
 }
 
 interface GS {
-  phase: 'playing' | 'intermission' | 'dead';
+  phase: 'playing' | 'paused' | 'intermission' | 'dead';
   wx: number;
   vy: number;
   ay: number;
@@ -282,6 +305,10 @@ interface GS {
   spawnMarks: number[]; // world-x thresholds that each release one zombie
   cpBurst: number;      // zombies released when the checkpoint is crossed
   solids: Solid[];      // this round's randomly generated obstacles & platforms
+  throwCount: number;   // for vinyl cadence
+  shakeT: number;       // screen shake timer (boss impacts)
+  hintT: number;        // first-run tutorial hint timer
+  roundTotal: number;   // total zombies in this round (for HUD progress)
   waveMsg: number;
 }
 
@@ -322,6 +349,7 @@ function mkGS(): GS {
       return { spawnQ: plan.initial, spawnT: 1000, spawnMarks: plan.marks, cpBurst: plan.burst };
     })(),
     solids: genRoundSolids(1, 0),
+    throwCount: 0, shakeT: 0, hintT: 7500, roundTotal: 8,
     waveMsg: 2500,
   };
 }
@@ -331,12 +359,20 @@ function spawnEnemy(g: GS, boss = false) {
   g.nextId++;
   const jitter = (g.nextId % 5) * 40;
   const etype = (g.nextId % 3) as 0 | 1 | 2;
-  const hp = boss ? BOSS_HP_BASE + g.wave * BOSS_HP_PER_WAVE : ENEMY_MAX_HP;
+  // Boss variety: bosses alternate between the brute and the charger
+  const charger = boss && Math.floor(g.wave / 3) % 2 === 0;
+  const stats = ETYPE_STATS[etype];
+  const hp = boss
+    ? Math.round((BOSS_HP_BASE + g.wave * BOSS_HP_PER_WAVE) * (charger ? 0.7 : 1))
+    : Math.round(stats.hp * waveHpMult(g.wave));
   g.enemies.push({
     id: `e${g.nextId}`, etype,
     wx: g.wx + side * (SPAWN_DIST + jitter),
     hp, maxHp: hp,
-    atkCd: 600, dead: false, fade: 1, step: 0, boss,
+    atkCd: 600, dead: false, fade: 1, step: 0, boss, charger,
+    spd: boss ? BOSS_SPD : stats.spd + waveSpdBoost(g.wave),
+    dmg: boss ? (charger ? 20 : BOSS_DMG) : stats.dmg,
+    scale: boss ? (charger ? 1.45 : BOSS_SCALE) : stats.scale,
   });
 }
 
@@ -392,6 +428,8 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   if (g.dmgFlash > 0) g.dmgFlash -= TICK_MS;
   if (g.waveMsg > 0) g.waveMsg -= TICK_MS;
   if (g.cpMsg > 0) g.cpMsg -= TICK_MS;
+  if (g.shakeT > 0) g.shakeT -= TICK_MS;
+  if (g.hintT > 0) g.hintT -= TICK_MS;
   if (g.micT > 0) {
     g.micT -= TICK_MS;
     if (g.micT <= 0) { g.micT = 0; switchMusic('bluegrass'); }
@@ -465,7 +503,9 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     const dir = dx >= 0 ? 1 : -1;
     const dist = Math.abs(dx);
 
-    const eSpd = e.boss ? BOSS_SPD : ENEMY_SPD;
+    // Charger boss lunges in bursts; everyone else uses their own speed stat
+    let eSpd = e.spd;
+    if (e.boss && e.charger) eSpd = e.step % 3400 < 1000 ? e.spd * 2.6 : e.spd * 0.75;
     const eReach = e.boss ? ENEMY_ATK_RANGE + 16 : ENEMY_ATK_RANGE;
     if (dist > eReach - 4) { e.wx += dir * eSpd; e.step += TICK_MS; }
 
@@ -483,10 +523,11 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
 
     if (e.atkCd > 0) e.atkCd -= TICK_MS;
     if (dist < eReach && e.atkCd <= 0 && g.iframeT <= 0 && g.micT <= 0) {
-      g.hp -= e.boss ? BOSS_DMG : ENEMY_DMG;
+      g.hp -= e.dmg;
       g.hitsTaken++; g.roundHits++;
       g.iframeT = IFRAME_DUR;
       g.dmgFlash = 280;
+      if (e.boss) g.shakeT = 340; // boss hits rattle the screen
       e.atkCd = ENEMY_ATK_CD;
       g.activePowerup = null; // losing the power-up is the price of getting hit
       if (g.hp <= 0) { g.hp = 0; g.phase = 'dead'; playSfx('gameover'); return; }
@@ -524,6 +565,7 @@ function startNextWave(g: GS) {
   const cnt = Math.min(8 + (g.wave - 1) * 3, 28);
   // Boss waves: a hulking boss plus a slightly thinner horde
   const horde = isBossWave(g.wave) ? Math.max(2, cnt - 3) : cnt;
+  g.roundTotal = horde + (isBossWave(g.wave) ? 1 : 0);
   if (isBossWave(g.wave)) spawnEnemy(g, true);
   const plan = planWaveSpawns(horde, g.roundStart);
   g.spawnQ = plan.initial;
@@ -553,8 +595,13 @@ function doAttack(g: GS) {
   g.atkT = atkDur;
 
   const dir = g.faceR ? 1 : -1;
-  const range = isKetchup ? KETCHUP_RANGE : ATTACK_RANGE;
-  const dmg = Math.round(ATTACK_DMG * (isChili ? CHILI_DMG_MULT : 1));
+  // Vinyl records: unlocked at wave 5, every 3rd throw — longer range, harder hit
+  g.throwCount++;
+  const vinyl = !isKetchup && g.wave >= VINYL_UNLOCK_WAVE && g.throwCount % VINYL_EVERY === 0;
+  const range = isKetchup ? KETCHUP_RANGE : vinyl ? VINYL_RANGE : ATTACK_RANGE;
+  const dmg = Math.round(
+    dvdDmgForWave(g.wave) * (isChili ? CHILI_DMG_MULT : 1) * (vinyl ? VINYL_DMG_MULT : 1)
+  );
 
   if (isKetchup) {
     // Spread shot: 3 DVDs at different Y offsets
@@ -562,22 +609,34 @@ function doAttack(g: GS) {
     g.dvds.push({ id: `d${++g.nextId}`, wx: g.wx + dir * 20, dir, t: 0, yOff: 0 });
     g.dvds.push({ id: `d${++g.nextId}`, wx: g.wx + dir * 20, dir, t: 0, yOff: 22 });
   } else {
-    g.dvds.push({ id: `d${++g.nextId}`, wx: g.wx + dir * 18, dir, t: 0, yOff: 0 });
+    g.dvds.push({ id: `d${++g.nextId}`, wx: g.wx + dir * 18, dir, t: 0, yOff: 0, vinyl });
   }
   playSfx('throw');
 
   // Hit enemies in range
   let hitCount = 0;
+  let killCount = 0;
   for (const e of g.enemies) {
     if (e.dead) continue;
     const dx = (e.wx - g.wx) * dir;
     if (dx >= -8 && dx < range) {
       e.hp -= dmg;
       hitCount++;
-      const hitTxt = hitCount > 1 ? 'THWACK!' : dx < range * 0.45 ? 'THWACK!' : 'WHIZZZ!';
+      if (e.boss) g.shakeT = Math.max(g.shakeT, 200); // boss impacts shake the screen
+      const hitTxt = vinyl ? 'SCRRRATCH!' : hitCount > 1 ? 'THWACK!' : dx < range * 0.45 ? 'THWACK!' : 'WHIZZZ!';
       g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: hitTxt });
-      if (e.hp <= 0) { e.dead = true; e.fade = 1; g.score += e.boss ? BOSS_SCORE : SCORE_PER_KILL; g.kills++; g.roundKills++; }
+      if (e.hp <= 0) {
+        e.dead = true; e.fade = 1;
+        g.score += e.boss ? BOSS_SCORE : SCORE_PER_KILL;
+        g.kills++; g.roundKills++; killCount++;
+        if (e.boss) g.shakeT = 420;
+      }
     }
+  }
+  // Multi-kill combo bonus
+  if (killCount >= 2) {
+    g.score += COMBO_BONUS * (killCount - 1);
+    g.hitEffects.push({ id: `h${++g.nextId}`, wx: g.wx + dir * 60, t: 0, text: `COMBO x${killCount}!` });
   }
   if (hitCount > 0) playSfx('hit');
 }
@@ -761,6 +820,7 @@ export default function GameScreen() {
   const gsRef = useRef<GS>(mkGS());
   const [, setFrame] = useState(0);
   const [isDead, setIsDead] = useState(false);
+  const [soundOff, setSoundOff] = useState(getMuted());
   const held = useRef({ l: false, r: false });
 
   const topOff = insets.top + WEB_TOP;
@@ -800,7 +860,10 @@ export default function GameScreen() {
       if (isNew) AsyncStorage.setItem(HS_KEY, String(g.score));
       router.replace({
         pathname: '/(tabs)/gameover',
-        params: { score: String(g.score), wave: String(g.wave), hs: String(hs), newHs: isNew ? '1' : '0' },
+        params: {
+          score: String(g.score), wave: String(g.wave), hs: String(hs), newHs: isNew ? '1' : '0',
+          kills: String(g.kills), hits: String(g.hitsTaken),
+        },
       });
     });
   }, [isDead]);
@@ -851,7 +914,10 @@ export default function GameScreen() {
     : C.atkBtnBorder;
 
   return (
-    <View style={[st.root, { backgroundColor: T.skyTop }]}>
+    <View style={[st.root, {
+      backgroundColor: T.skyTop,
+      transform: [{ translateX: g.shakeT > 0 ? Math.sin(tNow / 24) * 5 : 0 }],
+    }]}>
 
       {/* ── Sky ── */}
       <View style={[st.sky, { height: groundY, backgroundColor: T.skyBot }]}>
@@ -1161,7 +1227,9 @@ export default function GameScreen() {
       {g.hitEffects.map(eff => {
         const sx = SW / 2 + (eff.wx - g.wx);
         const prog = eff.t / 750;
-        const col = eff.text === 'THWACK!' ? C.thwack : '#FF8844';
+        const col = eff.text.startsWith('COMBO') ? C.gold
+          : eff.text === 'SCRRRATCH!' ? '#E8C8FF'
+          : eff.text === 'THWACK!' ? C.thwack : '#FF8844';
         return (
           <Text key={eff.id} style={{
             position: 'absolute',
@@ -1179,7 +1247,7 @@ export default function GameScreen() {
 
       {/* ── Enemies ── */}
       {g.enemies.map(e => {
-        const sc = e.boss ? BOSS_SCALE : 1;
+        const sc = e.scale;
         const eW = ENEMY_W * sc;
         const eH = ENEMY_H * sc;
         const eHD = ENEMY_HEAD_D * sc;
@@ -1193,7 +1261,9 @@ export default function GameScreen() {
         const armX = faceR ? ebx + eW - 2 : ebx - 18 * sc;
         const hpPctE = Math.max(0, e.hp / e.maxHp);
         const ec = e.boss
-          ? { body: C.bossBody, head: C.bossHead, shirt: '#3A1420', pants: '#241018' }
+          ? e.charger
+            ? { body: '#6E1414', head: '#8A6A2E', shirt: '#4A0E0E', pants: '#2A0A0A' }
+            : { body: C.bossBody, head: C.bossHead, shirt: '#3A1420', pants: '#241018' }
           : ENEMY_COLS[e.etype];
 
         return (
@@ -1208,7 +1278,7 @@ export default function GameScreen() {
                     textShadowColor: '#000', textShadowRadius: 3,
                     textShadowOffset: { width: 0, height: 1 },
                   }}>
-                    BOSS
+                    {e.charger ? 'CHARGER' : 'BOSS'}
                   </Text>
                 )}
                 <View style={[st.eHpBg, { left: ebx - 3, top: eHdY - 12, width: eW + 6, height: e.boss ? 7 : 5 }]}>
@@ -1362,6 +1432,23 @@ export default function GameScreen() {
           );
         }
 
+        if (dvd.vinyl) {
+          // Vinyl record — bigger black disc with a gold label
+          return (
+            <View key={dvd.id} pointerEvents="none" style={{
+              position: 'absolute', left: screenX - 14, top: dvdY - 3,
+              width: 28, height: 28, borderRadius: 14,
+              backgroundColor: '#141414',
+              borderWidth: 2, borderColor: '#2E2E2E',
+              opacity, transform: [{ rotate: `${rot}deg` }],
+            }}>
+              <View style={{ position: 'absolute', left: 8, top: 8, width: 12, height: 12, borderRadius: 6, backgroundColor: C.micGold }} />
+              <View style={{ position: 'absolute', left: 12, top: 12, width: 4, height: 4, borderRadius: 2, backgroundColor: '#141414' }} />
+              <View style={{ position: 'absolute', left: 4, top: 3, width: 6, height: 2, borderRadius: 1, backgroundColor: '#FFF', opacity: 0.35 }} />
+            </View>
+          );
+        }
+
         // Default: spinning DVD
         return (
           <View key={dvd.id} pointerEvents="none" style={{
@@ -1510,6 +1597,9 @@ export default function GameScreen() {
         <View style={st.hudWave}>
           <Text style={st.hudWaveTxt}>WAVE</Text>
           <Text style={st.hudWaveNum}>{g.wave}</Text>
+          <Text style={st.hudRemain}>
+            {Math.max(0, g.roundTotal - g.roundKills)}/{g.roundTotal} 🧟
+          </Text>
         </View>
         {/* Score + power-up indicator */}
         <View style={st.hudCenter}>
@@ -1544,13 +1634,25 @@ export default function GameScreen() {
           </View>
           <Text style={st.hpNum}>{g.hp}</Text>
         </View>
+        {/* Pause */}
+        <Pressable
+          style={st.pauseBtn}
+          onPress={() => {
+            const gg = gsRef.current;
+            if (gg.phase === 'playing') { gg.phase = 'paused'; setFrame(f => f + 1); }
+          }}
+        >
+          <Ionicons name="pause" size={16} color="rgba(255,255,255,0.75)" />
+        </Pressable>
       </View>
 
       {/* Wave banner */}
       {g.waveMsg > 200 && (
         <View style={[st.waveBanner, { top: topOff + HUD_H + 28 }]}>
           <Text style={[st.waveBannerTxt, isBossWave(g.wave) && { color: '#FF4D4D' }]}>WAVE {g.wave}</Text>
-          <Text style={st.waveBannerSub}>{isBossWave(g.wave) ? 'BOSS FIGHT!' : 'INCOMING!'}</Text>
+          <Text style={st.waveBannerSub}>
+            {isBossWave(g.wave) ? 'BOSS FIGHT!' : g.wave === VINYL_UNLOCK_WAVE ? 'VINYLS UNLOCKED!' : 'INCOMING!'}
+          </Text>
         </View>
       )}
 
@@ -1567,6 +1669,53 @@ export default function GameScreen() {
         <View style={[st.waveBanner, { top: topOff + HUD_H + 28 }]}>
           <Text style={[st.waveBannerTxt, { fontSize: 20, color: C.gold, textShadowColor: '#000' }]}>ZOMBIES CLEARED</Text>
           <Text style={[st.waveBannerSub, { color: C.goldDim, marginTop: -2 }]}>REACH THE FLAG →</Text>
+        </View>
+      )}
+
+      {/* First-run tutorial hint */}
+      {g.wave === 1 && g.hintT > 0 && g.waveMsg <= 200 && (
+        <View style={[st.hintBox, { top: topOff + HUD_H + 30, opacity: Math.min(1, g.hintT / 800) }]} pointerEvents="none">
+          <Text style={st.hintTxt}>💿  Throw DVDs at zombies</Text>
+          <Text style={st.hintTxt}>⬆️  Jump over obstacles &amp; onto platforms</Text>
+          <Text style={st.hintTxt}>🚩  Clear all zombies, then reach the flag</Text>
+        </View>
+      )}
+
+      {/* ── Pause overlay ── */}
+      {g.phase === 'paused' && (
+        <View style={[StyleSheet.absoluteFill, st.interWrap]}>
+          <View style={st.interCard}>
+            <Text style={st.interTitle}>PAUSED</Text>
+            <View style={st.interDivider} />
+            <Pressable
+              style={({ pressed }) => [st.interBtn, pressed && st.interBtnPressed]}
+              onPress={() => {
+                gsRef.current.phase = 'playing';
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              }}
+            >
+              <Ionicons name="play" size={18} color="#FFF" />
+              <Text style={st.interBtnTxt}>RESUME</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [st.pauseRowBtn, pressed && { opacity: 0.7 }]}
+              onPress={() => {
+                const next = !soundOff;
+                setMuted(next);
+                setSoundOff(next);
+              }}
+            >
+              <Ionicons name={soundOff ? 'volume-mute' : 'volume-high'} size={18} color="rgba(255,255,255,0.75)" />
+              <Text style={st.pauseRowTxt}>SOUND: {soundOff ? 'OFF' : 'ON'}</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [st.pauseRowBtn, pressed && { opacity: 0.7 }]}
+              onPress={() => router.replace('/(tabs)')}
+            >
+              <Ionicons name="home" size={16} color="rgba(255,255,255,0.55)" />
+              <Text style={st.pauseRowTxt}>QUIT TO MENU</Text>
+            </Pressable>
+          </View>
         </View>
       )}
 
@@ -1696,6 +1845,27 @@ const st = StyleSheet.create({
   hudWave: { width: 58, alignItems: 'flex-start' },
   hudWaveTxt: { color: '#5A4010', fontSize: 9, fontWeight: '700', letterSpacing: 1.5 },
   hudWaveNum: { color: C.goldDim, fontSize: 15, fontWeight: '900', lineHeight: 17 },
+  hudRemain: { color: '#7A6A40', fontSize: 9, fontWeight: '700', letterSpacing: 0.5 },
+  pauseBtn: {
+    width: 30, height: 30, borderRadius: 15,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  hintBox: {
+    position: 'absolute', alignSelf: 'center',
+    backgroundColor: 'rgba(5,3,10,0.82)',
+    borderWidth: 1, borderColor: 'rgba(245,200,66,0.35)',
+    borderRadius: 12, paddingVertical: 10, paddingHorizontal: 16, gap: 5,
+  },
+  hintTxt: { color: '#E8DCB8', fontSize: 12, fontWeight: '600', letterSpacing: 0.4 },
+  pauseRowBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 12, borderRadius: 40, marginTop: 8,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
+  },
+  pauseRowTxt: { color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '800', letterSpacing: 2 },
   hudCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 2 },
   hudScoreTxt: { color: C.gold, fontSize: 20, fontWeight: '900', letterSpacing: 1.5 },
   puBar: {

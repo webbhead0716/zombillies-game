@@ -25,6 +25,22 @@ const MUSIC_VOL: Record<MusicTrack, number> = {
   rockabilly: 0.55,
 };
 
+// ── Mute ───────────────────────────────────────────────────────────────────────
+let muted = false;
+export function getMuted() { return muted; }
+export function setMuted(m: boolean) {
+  try {
+    muted = m;
+    if (m) {
+      for (const p of musicPlayers.values()) p.pause();
+    } else if (musicWanted) {
+      getMusic(currentTrack).play();
+    }
+  } catch {
+    // non-fatal
+  }
+}
+
 let audioModeSet = false;
 async function ensureAudioMode() {
   if (audioModeSet) return;
@@ -73,6 +89,7 @@ function getPool(name: SfxName) {
 
 export function playSfx(name: SfxName) {
   try {
+    if (muted) return;
     ensureAudioMode();
     const now = Date.now();
     const last = lastPlayed.get(name) ?? 0;
@@ -117,7 +134,7 @@ export function startMusic(track: MusicTrack = 'bluegrass') {
     ensureAudioMode();
     musicWanted = true;
     currentTrack = track;
-    getMusic(track).play();
+    if (!muted) getMusic(track).play();
   } catch {
     // non-fatal
   }
@@ -131,7 +148,7 @@ export function switchMusic(track: MusicTrack) {
     prev?.pause();
     prev?.seekTo(0);
     currentTrack = track;
-    if (musicWanted) getMusic(track).play();
+    if (musicWanted && !muted) getMusic(track).play();
   } catch {
     // non-fatal
   }
