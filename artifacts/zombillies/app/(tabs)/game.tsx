@@ -252,10 +252,29 @@ interface GS {
   wave: number;
   spawnQ: number;
   spawnT: number;
+  spawnMarks: number[]; // world-x thresholds that each release one zombie
+  cpBurst: number;      // zombies released when the checkpoint is crossed
   waveMsg: number;
 }
 
 // ── Game logic ────────────────────────────────────────────────────────────────
+/**
+ * Split a wave's zombie count into: a small opening group, progress-triggered
+ * spawns staggered across the round, and a burst released at the checkpoint.
+ */
+function planWaveSpawns(cnt: number, roundStart: number) {
+  const initial = Math.max(2, Math.ceil(cnt * 0.3));
+  const burst = Math.max(1, Math.ceil(cnt * 0.25));
+  const nMarks = Math.max(0, cnt - initial - burst);
+  const marks: number[] = [];
+  const from = roundStart + 350;
+  const to = roundStart + ROUND_LEN - 350;
+  for (let i = 0; i < nMarks; i++) {
+    marks.push(from + ((to - from) * (i + 1)) / (nMarks + 1));
+  }
+  return { initial, marks, burst };
+}
+
 function mkGS(): GS {
   return {
     phase: 'playing',
@@ -270,7 +289,10 @@ function mkGS(): GS {
     kills: 0, hitsTaken: 0, roundKills: 0, roundHits: 0, roundScore: 0,
     nextId: 0,
     score: 0, wave: 1,
-    spawnQ: 8, spawnT: 1000,
+    ...(() => {
+      const plan = planWaveSpawns(8, 0);
+      return { spawnQ: plan.initial, spawnT: 1000, spawnMarks: plan.marks, cpBurst: plan.burst };
+    })(),
     waveMsg: 2500,
   };
 }
@@ -299,8 +321,15 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   if (holdR) { g.wx += spd; g.faceR = true; }
   if ((holdL || holdR) && g.grounded) g.step += TICK_MS;
 
+  // Progress-triggered spawns: crossing each mark releases another zombie
+  while (g.spawnMarks.length > 0 && g.wx >= g.spawnMarks[0]) {
+    g.spawnMarks.shift();
+    g.spawnQ++;
+  }
+
   // The endpoint flag is a wall until every zombie in the wave is dead
-  const anyAlive = g.spawnQ > 0 || g.enemies.some(e => !e.dead);
+  const anyAlive =
+    g.spawnQ > 0 || g.spawnMarks.length > 0 || g.cpBurst > 0 || g.enemies.some(e => !e.dead);
   const endX = g.roundStart + ROUND_LEN;
   if (anyAlive && g.wx > endX - 24) g.wx = endX - 24;
 
@@ -344,6 +373,9 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     g.hp = PLAYER_MAX_HP;
     g.dmgFlash = 0;
     g.cpMsg = 2200;
+    // Checkpoint ambush — release the reserved burst of zombies
+    g.spawnQ += g.cpBurst;
+    g.cpBurst = 0;
     playSfx('powerup');
   }
 
@@ -439,7 +471,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   if (g.spawnQ > 0) {
     g.spawnT -= TICK_MS;
     if (g.spawnT <= 0) { spawnEnemy(g); g.spawnQ--; g.spawnT = 800; }
-  } else if (alive === 0) {
+  } else if (alive === 0 && g.spawnMarks.length === 0 && g.cpBurst === 0) {
     // Zombies cleared — crossing the endpoint flag ends the round
     if (g.wx >= g.roundStart + ROUND_LEN - 12) {
       g.score += WAVE_BONUS;
@@ -461,12 +493,12 @@ function startNextWave(g: GS) {
   g.roundScore = g.score;
   const cnt = Math.min(8 + (g.wave - 1) * 3, 28);
   // Boss waves: a hulking boss plus a slightly thinner horde
-  if (isBossWave(g.wave)) {
-    spawnEnemy(g, true);
-    g.spawnQ = Math.max(2, cnt - 3);
-  } else {
-    g.spawnQ = cnt;
-  }
+  const horde = isBossWave(g.wave) ? Math.max(2, cnt - 3) : cnt;
+  if (isBossWave(g.wave)) spawnEnemy(g, true);
+  const plan = planWaveSpawns(horde, g.roundStart);
+  g.spawnQ = plan.initial;
+  g.spawnMarks = plan.marks;
+  g.cpBurst = plan.burst;
   g.spawnT = 800;
   g.waveMsg = 2500;
   g.dvds = [];
@@ -1459,7 +1491,7 @@ export default function GameScreen() {
       )}
 
       {/* Round-clear hint: head to the endpoint flag */}
-      {g.spawnQ === 0 && g.enemies.filter(e => !e.dead).length === 0 && g.wx < g.roundStart + ROUND_LEN && g.waveMsg <= 200 && g.cpMsg <= 200 && (
+      {g.spawnQ === 0 && g.spawnMarks.length === 0 && g.cpBurst === 0 && g.enemies.filter(e => !e.dead).length === 0 && g.wx < g.roundStart + ROUND_LEN && g.waveMsg <= 200 && g.cpMsg <= 200 && (
         <View style={[st.waveBanner, { top: topOff + HUD_H + 28 }]}>
           <Text style={[st.waveBannerTxt, { fontSize: 20, color: C.gold, textShadowColor: '#000' }]}>ZOMBIES CLEARED</Text>
           <Text style={[st.waveBannerSub, { color: C.goldDim, marginTop: -2 }]}>REACH THE FLAG →</Text>
