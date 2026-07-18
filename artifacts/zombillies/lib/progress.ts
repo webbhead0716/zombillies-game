@@ -99,6 +99,38 @@ export async function saveHat(id: string) {
   try { await AsyncStorage.setItem(K_HAT, id); } catch {}
 }
 
+// ── Saved run (save & continue) ────────────────────────────────────────────────
+const K_RUN = 'zb_run';
+export interface RunSnapshot {
+  wave: number;        // last completed wave — resume into its intermission
+  hp: number;
+  maxHp: number;
+  score: number;
+  kills: number;
+  hits: number;
+  bossKills: number;
+  teeth: number;       // unbanked teeth still carried by the run
+  dmgMult: number;
+  spdMult: number;
+  upgDmg: number;
+  upgMic: number;
+  streak: number;
+}
+export async function saveRun(s: RunSnapshot) {
+  try { await AsyncStorage.setItem(K_RUN, JSON.stringify(s)); } catch {}
+}
+export async function loadRun(): Promise<RunSnapshot | null> {
+  try {
+    const raw = await AsyncStorage.getItem(K_RUN);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    return typeof s?.wave === 'number' && s.wave >= 1 ? s : null;
+  } catch { return null; }
+}
+export async function clearRun() {
+  try { await AsyncStorage.removeItem(K_RUN); } catch {}
+}
+
 // ── Daily challenge ────────────────────────────────────────────────────────────
 export function todayKey(): string {
   const d = new Date();

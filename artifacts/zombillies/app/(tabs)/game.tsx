@@ -12,7 +12,9 @@ import { router, useLocalSearchParams } from 'expo-router';
 import {
   loadUpgrades, loadStats, loadHat, addTeeth, recordRun, saveDailyBest,
   todayMod, dailySeed, HATS,
+  saveRun, loadRun, clearRun, type Upgrades,
 } from '../../lib/progress';
+import Shop from '../../components/Shop';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -337,6 +339,7 @@ interface GS {
   // Streak / currency / juice
   streak: number;       // kills since last hit taken
   teeth: number;        // currency earned this run
+  teethBanked: number;  // portion of `teeth` already persisted to storage
   bossKills: number;
   slowmoT: number;      // slow-motion timer after boss kills
   // Daily challenge modifiers
@@ -388,7 +391,7 @@ function mkGS(): GS {
     throwCount: 0, shakeT: 0, hintT: 7500, roundTotal: 8,
     maxHp: PLAYER_MAX_HP, upgDmg: 0, upgMic: 0,
     dmgMult: 1, spdMult: 1,
-    streak: 0, teeth: 0, bossKills: 0, slowmoT: 0,
+    streak: 0, teeth: 0, teethBanked: 0, bossKills: 0, slowmoT: 0,
     daily: false, forceRunners: false, hpMult: 1, noCheckpoints: false, seedOffset: 0,
     waveMsg: 2500,
   };
@@ -612,6 +615,21 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
       g.score += WAVE_BONUS;
       g.phase = 'intermission';
       playSfx('powerup');
+      // Bank teeth + autosave the run at every wave clear.
+      // The snapshot is ALWAYS this pre-perk intermission state — it is the
+      // single canonical resume point (SAVE & QUIT never writes its own).
+      const unbanked = g.teeth - g.teethBanked;
+      if (unbanked > 0) g.teethBanked = g.teeth;
+      const snap = g.daily ? null : {
+        wave: g.wave, hp: g.hp, maxHp: g.maxHp, score: g.score,
+        kills: g.kills, hits: g.hitsTaken, bossKills: g.bossKills,
+        teeth: g.teeth, dmgMult: g.dmgMult, spdMult: g.spdMult,
+        upgDmg: g.upgDmg, upgMic: g.upgMic, streak: g.streak,
+      };
+      (async () => {
+        if (unbanked > 0) await addTeeth(unbanked);
+        if (snap) await saveRun(snap);
+      })();
     }
   }
 }
@@ -888,6 +906,7 @@ export default function GameScreen() {
   const [soundOff, setSoundOff] = useState(getMuted());
   const [bestWave, setBestWave] = useState(0);
   const persistedRef = useRef(false); // one-shot guard for run persistence
+  const [shopOpen, setShopOpen] = useState(false);
   const [hatId, setHatId] = useState('classic');
   const routeParams = useLocalSearchParams<{ mode?: string }>();
 
@@ -903,15 +922,43 @@ export default function GameScreen() {
       gg.hpMult = mod.id === 'tough' ? 1.5 : 1;
       gg.solids = genRoundSolids(1 + gg.seedOffset, 0);
     }
-    loadUpgrades().then(u => {
-      const g2 = gsRef.current;
-      // Only apply if the run is still fresh — never buff/heal mid-run
-      if (g2.wave !== 1 || g2.kills > 0 || g2.hitsTaken > 0 || g2.phase === 'dead') return;
-      g2.maxHp = PLAYER_MAX_HP + u.hp * 10;
-      g2.hp = g2.maxHp;
-      g2.upgDmg = u.dmg * 4;
-      g2.upgMic = u.mic * 3000;
-    });
+    if (routeParams.mode === 'continue') {
+      // Resume a saved run at the intermission after its last cleared wave
+      loadRun().then(snap => {
+        const g2 = gsRef.current;
+        if (!snap || g2.kills > 0 || g2.hitsTaken > 0 || g2.phase === 'dead') return;
+        g2.wave = snap.wave;
+        g2.roundStart = -ROUND_LEN; // startNextWave advances this to 0
+        g2.hp = snap.hp;
+        g2.maxHp = snap.maxHp;
+        g2.score = snap.score;
+        g2.roundScore = snap.score;
+        g2.kills = snap.kills;
+        g2.hitsTaken = snap.hits;
+        g2.bossKills = snap.bossKills;
+        g2.teeth = snap.teeth;
+        g2.teethBanked = snap.teeth; // everything in the snapshot is already banked
+        g2.dmgMult = snap.dmgMult;
+        g2.spdMult = snap.spdMult;
+        g2.upgDmg = snap.upgDmg;
+        g2.upgMic = snap.upgMic;
+        g2.streak = snap.streak;
+        g2.spawnQ = 0; g2.spawnMarks = []; g2.cpBurst = 0;
+        g2.enemies = [];
+        g2.hintT = 0;
+        g2.phase = 'intermission';
+      });
+    } else {
+      loadUpgrades().then(u => {
+        const g2 = gsRef.current;
+        // Only apply if the run is still fresh — never buff/heal mid-run
+        if (g2.wave !== 1 || g2.kills > 0 || g2.hitsTaken > 0 || g2.phase === 'dead') return;
+        g2.maxHp = PLAYER_MAX_HP + u.hp * 10;
+        g2.hp = g2.maxHp;
+        g2.upgDmg = u.dmg * 4;
+        g2.upgMic = u.mic * 3000;
+      });
+    }
     loadStats().then(s => setBestWave(s.bestWave));
     loadHat().then(setHatId);
   }, []);
@@ -962,12 +1009,17 @@ export default function GameScreen() {
         },
       });
     });
-    // Persist run progression exactly once, even if this effect re-fires
+    // Persist run progression exactly once, even if this effect re-fires.
+    // Ordered writes: bank + record first, clear the save slot last, so a
+    // crash mid-sequence can never leave rewards unbanked.
     if (!persistedRef.current) {
       persistedRef.current = true;
-      addTeeth(g.teeth);
-      recordRun(g.kills, g.bossKills, g.wave);
-      if (g.daily) saveDailyBest(g.score);
+      (async () => {
+        await addTeeth(g.teeth - g.teethBanked); // only what wasn't banked at wave clears
+        await recordRun(g.kills, g.bossKills, g.wave);
+        if (g.daily) await saveDailyBest(g.score);
+        await clearRun(); // the run is over — no continuing a dead run
+      })();
     }
   }, [isDead]);
 
@@ -1844,10 +1896,28 @@ export default function GameScreen() {
             </Pressable>
             <Pressable
               style={({ pressed }) => [st.pauseRowBtn, pressed && { opacity: 0.7 }]}
-              onPress={() => router.replace('/(tabs)')}
+              onPress={() => setShopOpen(true)}
             >
-              <Ionicons name="home" size={16} color="rgba(255,255,255,0.55)" />
-              <Text style={st.pauseRowTxt}>QUIT TO MENU</Text>
+              <Ionicons name="cart" size={16} color="#F5C842" />
+              <Text style={st.pauseRowTxt}>SHOP</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [st.pauseRowBtn, pressed && { opacity: 0.7 }]}
+              onPress={async () => {
+                const gg = gsRef.current;
+                // Bank any unbanked teeth, then leave. The resume point stays
+                // the last wave-clear autosave (pre-perk) — quitting mid-wave
+                // means that wave restarts, so we never snapshot mid-wave state.
+                const unbanked = gg.teeth - gg.teethBanked;
+                if (unbanked > 0) {
+                  gg.teethBanked = gg.teeth;
+                  await addTeeth(unbanked);
+                }
+                router.replace('/(tabs)');
+              }}
+            >
+              <Ionicons name="save" size={16} color="rgba(255,255,255,0.55)" />
+              <Text style={st.pauseRowTxt}>{g.daily || g.wave <= 1 ? 'QUIT TO MENU' : 'SAVE & QUIT'}</Text>
             </Pressable>
           </View>
         </View>
@@ -1921,8 +1991,30 @@ export default function GameScreen() {
                 </Pressable>
               ));
             })()}
+            <Pressable
+              style={({ pressed }) => [st.pauseRowBtn, pressed && { opacity: 0.7 }]}
+              onPress={() => setShopOpen(true)}
+            >
+              <Ionicons name="cart" size={16} color="#F5C842" />
+              <Text style={st.pauseRowTxt}>VISIT THE SHOP</Text>
+            </Pressable>
           </View>
         </View>
+      )}
+
+      {/* ── Shop (from pause or intermission) ── */}
+      {shopOpen && (
+        <Shop
+          onClose={() => setShopOpen(false)}
+          onHatChange={setHatId}
+          onPurchased={(key, u) => {
+            // Apply the purchase to the live run immediately
+            const gg = gsRef.current;
+            if (key === 'hp') { gg.maxHp += 10; gg.hp += 10; }
+            else if (key === 'dmg') gg.upgDmg = u.dmg * 4;
+            else if (key === 'mic') gg.upgMic = u.mic * 3000;
+          }}
+        />
       )}
 
       {/* ── Controls ── */}
