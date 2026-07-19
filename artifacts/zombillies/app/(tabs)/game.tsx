@@ -118,8 +118,13 @@ const HEAD_D = 21;
 const HAT_H = 12;
 const HAT_W = 30;
 const PLAYER_SPD = 5.5;
-const JUMP_VY = -15.5;
+// Variable jump: tap = short hop, hold = full height.
+// While rising with the button held, gravity is lighter (floatier ascent);
+// releasing early cuts upward velocity so the jump apexes immediately.
+const JUMP_VY = -12.8;
 const GRAV = 0.72;
+const JUMP_HOLD_GRAV = 0.44;  // gravity while rising & button held
+const JUMP_CUT = 0.45;        // vy multiplier on early release
 const PLAYER_MAX_HP = 100;
 
 // DVD / attack
@@ -320,6 +325,7 @@ interface GS {
   vy: number;
   ay: number;
   grounded: boolean;
+  jumpCut: boolean;   // true once the variable-jump boost is spent
   faceR: boolean;
   hp: number;
   atkActive: boolean;
@@ -412,7 +418,7 @@ function planWaveSpawns(cnt: number, roundStart: number) {
 function mkGS(): GS {
   return {
     phase: 'playing',
-    wx: 0, vy: 0, ay: 0, grounded: true, faceR: true,
+    wx: 0, vy: 0, ay: 0, grounded: true, jumpCut: true, faceR: true,
     hp: PLAYER_MAX_HP,
     atkActive: false, atkT: 0, iframeT: 0, dmgFlash: 0, step: 0,
     enemies: [], dvds: [], globs: [], hitEffects: [],
@@ -554,7 +560,7 @@ function damagePlayer(g: GS, dmg: number, fromBoss: boolean) {
   playSfx('hurt');
 }
 
-function gameTick(g: GS, holdL: boolean, holdR: boolean) {
+function gameTick(g: GS, holdL: boolean, holdR: boolean, holdJ: boolean) {
   if (g.phase !== 'playing') return;
 
   // Boss-kill slow-mo: run the world at half speed by skipping alternate ticks
@@ -593,9 +599,15 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     }
   }
 
-  // Vertical physics — land on ground, obstacles, or floating platforms
+  // Vertical physics — land on ground, obstacles, or floating platforms.
+  // Variable jump height: holding JUMP while rising floats (lighter gravity);
+  // releasing early cuts the ascent so tap = short hop, hold = full jump.
   const prevAy = g.ay;
-  g.vy += GRAV;
+  if (g.vy < 0 && !g.jumpCut && !holdJ) {
+    g.vy *= JUMP_CUT;
+    g.jumpCut = true;
+  }
+  g.vy += g.vy < 0 && !g.jumpCut && holdJ ? JUMP_HOLD_GRAV : GRAV;
   g.ay -= g.vy;
   let supportH = 0;
   for (const s of g.solids) {
@@ -844,7 +856,7 @@ function startNextWave(g: GS) {
 }
 
 function doJump(g: GS) {
-  if (g.grounded) { g.vy = JUMP_VY; g.grounded = false; }
+  if (g.grounded) { g.vy = JUMP_VY; g.grounded = false; g.jumpCut = false; }
 }
 
 function doAttack(g: GS) {
@@ -1164,7 +1176,7 @@ export default function GameScreen() {
     loadStats().then(s => setBestWave(s.bestWave));
     loadHat().then(setHatId);
   }, []);
-  const held = useRef({ l: false, r: false });
+  const held = useRef({ l: false, r: false, j: false });
 
   const topOff = insets.top + WEB_TOP;
   const botOff = insets.bottom + WEB_BOT;
@@ -1173,7 +1185,7 @@ export default function GameScreen() {
 
   const tickFn = useCallback(() => {
     const g = gsRef.current;
-    gameTick(g, held.current.l, held.current.r);
+    gameTick(g, held.current.l, held.current.r, held.current.j);
     if (g.phase === 'dead') setIsDead(true);
     else setFrame(f => f + 1);
   }, []);
@@ -2305,7 +2317,8 @@ export default function GameScreen() {
         <View style={st.actions}>
           <Pressable
             style={({ pressed }) => [st.btn, pressed && st.btnActive]}
-            onPress={() => { doJump(gsRef.current); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); }}
+            onPressIn={() => { held.current.j = true; doJump(gsRef.current); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); }}
+            onPressOut={() => { held.current.j = false; }}
           >
             <Ionicons name="arrow-up" size={26} color={C.white} />
           </Pressable>
