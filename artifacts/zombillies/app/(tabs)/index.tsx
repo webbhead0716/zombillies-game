@@ -12,8 +12,14 @@ import { router, useFocusEffect } from 'expo-router';
 import { startMusic } from '../../lib/sound';
 import {
   loadTeeth, loadStats, loadDailyBest, loadRun, todayMod,
+  loadDailyStreak, streakAlive, loadEndlessBest, ENDLESS_UNLOCK_WAVE,
   type LifetimeStats, type RunSnapshot,
 } from '../../lib/progress';
+import {
+  todayQuests, loadQuestState, claimQuest, ACH_DEFS, loadAchievements,
+  type Quest, type QuestState,
+} from '../../lib/meta';
+import { ScrollView } from 'react-native';
 import Shop from '../../components/Shop';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -61,13 +67,26 @@ export default function MenuScreen() {
   const [dailyBest, setDailyBest] = useState(0);
   const [shopOpen, setShopOpen] = useState(false);
   const [savedRun, setSavedRun] = useState<RunSnapshot | null>(null);
+  const [streak, setStreak] = useState(0);
+  const [endlessBest, setEndlessBest] = useState(0);
+  const [quests] = useState<Quest[]>(() => todayQuests());
+  const [questState, setQuestState] = useState<QuestState>({ progress: [0, 0, 0], claimed: [false, false, false] });
+  const [bountiesOpen, setBountiesOpen] = useState(false);
+  const [badgesOpen, setBadgesOpen] = useState(false);
+  const [achOwned, setAchOwned] = useState<string[]>([]);
 
   const reloadProgress = React.useCallback(() => {
     loadTeeth().then(setTeeth);
     loadStats().then(setStats);
     loadDailyBest().then(setDailyBest);
     loadRun().then(setSavedRun);
+    loadDailyStreak().then(s => setStreak(streakAlive(s)));
+    loadEndlessBest().then(setEndlessBest);
+    loadQuestState().then(setQuestState);
+    loadAchievements().then(setAchOwned);
   }, []);
+
+  const claimable = quests.filter((q, i) => !questState.claimed[i] && questState.progress[i] >= q.n).length;
 
   const titleY = useRef(new Animated.Value(-80)).current;
   const titleOpacity = useRef(new Animated.Value(0)).current;
@@ -263,6 +282,12 @@ export default function MenuScreen() {
             <Text style={s.hsVal}>{stats.bestWave}</Text>
           </View>
         )}
+        {streak > 0 && (
+          <View style={[s.hsBadge, { borderColor: '#5A2A0A' }]}>
+            <Text style={[s.hsLabel, { color: '#B06020' }]}>STREAK</Text>
+            <Text style={s.hsVal}>🔥 {streak}</Text>
+          </View>
+        )}
       </View>
 
       {/* ── Play / Continue buttons ── */}
@@ -309,6 +334,42 @@ export default function MenuScreen() {
         </Pressable>
       </View>
 
+      {/* ── Endless / bounties / badges row ── */}
+      <View style={{ flexDirection: 'row', gap: 10, marginLeft: 22, marginTop: 10, flexWrap: 'wrap', maxWidth: SW - 30 }}>
+        <Pressable
+          style={({ pressed }) => [s.secBtn, pressed && { opacity: 0.7 }, stats.bestWave < ENDLESS_UNLOCK_WAVE && { opacity: 0.45 }]}
+          onPress={() => {
+            if (stats.bestWave >= ENDLESS_UNLOCK_WAVE) {
+              router.push({ pathname: '/(tabs)/game', params: { mode: 'endless' } });
+            }
+          }}
+        >
+          <Ionicons name={stats.bestWave >= ENDLESS_UNLOCK_WAVE ? 'infinite' : 'lock-closed'} size={16} color="#FF8A3C" />
+          <View>
+            <Text style={s.secBtnTxt}>ENDLESS</Text>
+            <Text style={s.secBtnSub}>
+              {stats.bestWave >= ENDLESS_UNLOCK_WAVE
+                ? endlessBest > 0 ? `best: ${endlessBest.toLocaleString()}` : 'no perks menu · pure chaos'
+                : `reach wave ${ENDLESS_UNLOCK_WAVE} to unlock`}
+            </Text>
+          </View>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [s.secBtn, pressed && { opacity: 0.7 }]}
+          onPress={() => setBountiesOpen(true)}
+        >
+          <Ionicons name="list" size={16} color="#7FD44A" />
+          <Text style={s.secBtnTxt}>BOUNTIES{claimable > 0 ? ` (${claimable}!)` : ''}</Text>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [s.secBtn, pressed && { opacity: 0.7 }]}
+          onPress={() => setBadgesOpen(true)}
+        >
+          <Ionicons name="ribbon" size={16} color="#B48AFF" />
+          <Text style={s.secBtnTxt}>BADGES {achOwned.length}/{ACH_DEFS.length}</Text>
+        </Pressable>
+      </View>
+
       <Text style={[s.tip, { bottom: botOff + 16 }]}>
         Throw DVDs. Silence the horde. Survive.
       </Text>
@@ -316,6 +377,78 @@ export default function MenuScreen() {
       {/* ── Shop modal ── */}
       {shopOpen && (
         <Shop onClose={() => { setShopOpen(false); reloadProgress(); }} />
+      )}
+
+      {/* ── Daily bounties overlay ── */}
+      {bountiesOpen && (
+        <View style={s.ovWrap}>
+          <View style={s.ovCard}>
+            <Text style={s.ovTitle}>DAILY BOUNTIES</Text>
+            <Text style={s.ovSub}>New goals every day · progress counts across all runs</Text>
+            {quests.map((q, i) => {
+              const prog = Math.min(questState.progress[i], q.n);
+              const done = prog >= q.n;
+              const claimed = questState.claimed[i];
+              return (
+                <View key={i} style={s.qRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.qTxt}>{q.txt}</Text>
+                    <View style={s.qBarBg}>
+                      <View style={[s.qBarFill, { width: `${(prog / q.n) * 100}%`, backgroundColor: done ? '#7FD44A' : '#F5C842' }]} />
+                    </View>
+                    <Text style={s.qProg}>{prog} / {q.n} · reward 🦷 {q.reward}</Text>
+                  </View>
+                  {claimed ? (
+                    <Ionicons name="checkmark-circle" size={26} color="#7FD44A" />
+                  ) : done ? (
+                    <Pressable
+                      style={({ pressed }) => [s.claimBtn, pressed && { opacity: 0.7 }]}
+                      onPress={async () => {
+                        await claimQuest(i);
+                        reloadProgress();
+                      }}
+                    >
+                      <Text style={s.claimTxt}>CLAIM</Text>
+                    </Pressable>
+                  ) : (
+                    <Ionicons name="ellipse-outline" size={22} color="rgba(255,255,255,0.2)" />
+                  )}
+                </View>
+              );
+            })}
+            <Pressable style={({ pressed }) => [s.ovClose, pressed && { opacity: 0.7 }]} onPress={() => setBountiesOpen(false)}>
+              <Text style={s.ovCloseTxt}>CLOSE</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      {/* ── Achievements overlay ── */}
+      {badgesOpen && (
+        <View style={s.ovWrap}>
+          <View style={[s.ovCard, { maxHeight: SH * 0.75 }]}>
+            <Text style={s.ovTitle}>BADGES</Text>
+            <Text style={s.ovSub}>{achOwned.length} of {ACH_DEFS.length} unlocked</Text>
+            <ScrollView style={{ maxHeight: SH * 0.5 }}>
+              {ACH_DEFS.map(a => {
+                const owned = achOwned.includes(a.id);
+                return (
+                  <View key={a.id} style={[s.qRow, !owned && { opacity: 0.38 }]}>
+                    <Ionicons name={a.icon as any} size={22} color={owned ? '#F5C842' : 'rgba(255,255,255,0.4)'} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.qTxt}>{a.name}</Text>
+                      <Text style={s.qProg}>{a.desc}</Text>
+                    </View>
+                    {owned && <Ionicons name="checkmark-circle" size={22} color="#7FD44A" />}
+                  </View>
+                );
+              })}
+            </ScrollView>
+            <Pressable style={({ pressed }) => [s.ovClose, pressed && { opacity: 0.7 }]} onPress={() => setBadgesOpen(false)}>
+              <Text style={s.ovCloseTxt}>CLOSE</Text>
+            </Pressable>
+          </View>
+        </View>
       )}
     </View>
   );
@@ -434,4 +567,32 @@ const s = StyleSheet.create({
   // Continue button
   contBtn: { backgroundColor: '#1B6B2A', marginBottom: 12 },
   contSub: { color: 'rgba(255,255,255,0.65)', fontSize: 10, fontWeight: '700' },
+
+  // Bounties / badges overlays
+  ovWrap: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.82)',
+    alignItems: 'center', justifyContent: 'center', zIndex: 50,
+  },
+  ovCard: {
+    width: SW - 40, backgroundColor: '#0C0A12',
+    borderWidth: 1, borderColor: '#2A2438', borderRadius: 18,
+    padding: 20, gap: 12,
+  },
+  ovTitle: { color: '#F5C842', fontSize: 20, fontWeight: '900', letterSpacing: 3, textAlign: 'center' },
+  ovSub: { color: 'rgba(255,255,255,0.4)', fontSize: 10, fontWeight: '600', textAlign: 'center', marginTop: -6 },
+  qRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8 },
+  qTxt: { color: '#FFF', fontSize: 13, fontWeight: '800', letterSpacing: 0.5 },
+  qBarBg: { height: 6, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 3, marginTop: 5, overflow: 'hidden' },
+  qBarFill: { height: 6, borderRadius: 3 },
+  qProg: { color: 'rgba(255,255,255,0.4)', fontSize: 10, fontWeight: '600', marginTop: 3 },
+  claimBtn: {
+    backgroundColor: '#1B6B2A', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 20,
+  },
+  claimTxt: { color: '#FFF', fontSize: 11, fontWeight: '900', letterSpacing: 1.5 },
+  ovClose: {
+    marginTop: 4, paddingVertical: 12, borderRadius: 30,
+    backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center',
+  },
+  ovCloseTxt: { color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '800', letterSpacing: 2 },
 });

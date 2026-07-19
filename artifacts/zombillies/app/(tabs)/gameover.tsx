@@ -6,6 +6,7 @@ import {
   Pressable,
   Animated,
   Platform,
+  Share,
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -35,6 +36,10 @@ export default function GameOverScreen() {
     bosses: string;
     teeth: string;
     daily: string;
+    endless: string;
+    streak: string;
+    streakBonus: string;
+    ach: string;
   }>();
 
   const score = parseInt(params.score ?? '0');
@@ -46,6 +51,24 @@ export default function GameOverScreen() {
   const bosses = parseInt(params.bosses ?? '0');
   const teeth = parseInt(params.teeth ?? '0');
   const isDaily = params.daily === '1';
+  const isEndless = params.endless === '1';
+  const streak = parseInt(params.streak ?? '0');
+  const streakBonus = parseInt(params.streakBonus ?? '0');
+  const newAch = (params.ach ?? '').split('|').filter(Boolean);
+  const [shared, setShared] = React.useState(false);
+
+  const onShare = async () => {
+    const msg = `💀 ZOMBILLIES${isEndless ? ' ENDLESS' : ''} — I survived to wave ${wave} with ${score.toLocaleString()} points and ${kills} zombie kills! Think you can beat me? 💿🧟`;
+    try {
+      if (Platform.OS === 'web') {
+        const nav: any = typeof navigator !== 'undefined' ? navigator : null;
+        if (nav?.share) await nav.share({ text: msg });
+        else if (nav?.clipboard) { await nav.clipboard.writeText(msg); setShared(true); setTimeout(() => setShared(false), 2000); }
+      } else {
+        await Share.share({ message: msg });
+      }
+    } catch {}
+  };
 
   const topOff = insets.top + WEB_TOP;
   const botOff = insets.bottom + WEB_BOT;
@@ -121,6 +144,7 @@ export default function GameOverScreen() {
         {/* Stats card */}
         <View style={s.statsCard}>
           {isDaily && <Text style={s.dailyBadge}>📅 DAILY CHALLENGE RUN</Text>}
+          {isEndless && <Text style={[s.dailyBadge, { color: '#FF8A3C' }]}>♾️ ENDLESS RUN</Text>}
           {/* Shareable run summary */}
           <Text style={s.runSummary}>
             WAVE {wave} · {kills} KILLS{bosses > 0 ? ` · ${bosses} BOSS${bosses > 1 ? 'ES' : ''}` : ''}
@@ -154,6 +178,24 @@ export default function GameOverScreen() {
             <Text style={s.statLabel}>SCORE</Text>
             <Text style={s.statValBig}>{score.toLocaleString()}</Text>
           </View>
+
+          {isDaily && streak > 0 && (
+            <>
+              <View style={s.divider} />
+              <View style={s.statRow}>
+                <Text style={s.statLabel}>DAILY STREAK</Text>
+                <Text style={s.statVal}>🔥 {streak}{streakBonus > 0 ? `  +${streakBonus} 🦷` : ''}</Text>
+              </View>
+            </>
+          )}
+
+          {newAch.length > 0 && (
+            <View style={s.achBox}>
+              {newAch.map(n => (
+                <Text key={n} style={s.achTxt}>🏅 {n} UNLOCKED!</Text>
+              ))}
+            </View>
+          )}
 
           {isNewHs ? (
             <Animated.View style={[s.newHsBadge, { transform: [{ scale: hsBounce }] }]}>
@@ -192,6 +234,14 @@ export default function GameOverScreen() {
           >
             <Ionicons name="refresh" size={22} color="#FFF" />
             <Text style={s.playAgainTxt}>PLAY AGAIN</Text>
+          </Pressable>
+
+          <Pressable
+            style={({ pressed }) => [s.menuBtn, pressed && s.menuBtnPressed]}
+            onPress={onShare}
+          >
+            <Ionicons name="share-social" size={18} color="rgba(255,255,255,0.6)" />
+            <Text style={s.menuTxt}>{shared ? 'COPIED!' : 'SHARE SCORE'}</Text>
           </Pressable>
 
           <Pressable
@@ -275,6 +325,12 @@ const s = StyleSheet.create({
     color: '#C8B888', fontSize: 13, fontWeight: '900', letterSpacing: 1.5,
     textAlign: 'center', marginBottom: 4,
   },
+  achBox: {
+    backgroundColor: 'rgba(180,138,255,0.1)',
+    borderWidth: 1, borderColor: '#4A3A6A', borderRadius: 10,
+    paddingVertical: 8, alignItems: 'center', gap: 3,
+  },
+  achTxt: { color: '#B48AFF', fontSize: 12, fontWeight: '900', letterSpacing: 1.5 },
   newHsBadge: {
     backgroundColor: 'rgba(204,34,0,0.18)',
     borderWidth: 1,

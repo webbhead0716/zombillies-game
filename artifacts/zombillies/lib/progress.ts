@@ -27,7 +27,8 @@ export const UPG_DEFS = [
 ];
 export const upgCost = (level: number) => (level + 1) * 50;
 
-// Unlockable trucker caps (by lifetime kills / best wave)
+// Unlockable trucker caps (by lifetime kills / best wave).
+// Each hat grants a small run bonus so unlocks matter beyond looks.
 export interface Hat {
   id: string;
   name: string;
@@ -36,12 +37,20 @@ export interface Hat {
   reqKills: number;
   reqWave: number;
   reqTxt: string;
+  bonusTxt: string;
+  // Run bonuses applied at run start
+  dmg?: number;   // damage multiplier bonus (0.10 = +10%)
+  spd?: number;   // move speed multiplier bonus
+  hp?: number;    // flat max HP bonus
+  teeth?: number; // extra teeth per kill
 }
 export const HATS: Hat[] = [
-  { id: 'classic', name: 'CLASSIC', cap: '#3A2313', visor: '#241206', reqKills: 0, reqWave: 0, reqTxt: '' },
-  { id: 'red', name: 'ROAD RASH', cap: '#8B1A1A', visor: '#4A0A0A', reqKills: 250, reqWave: 0, reqTxt: '250 lifetime kills' },
-  { id: 'blue', name: 'BLUE RIDGE', cap: '#1B4A8B', visor: '#0A2448', reqKills: 0, reqWave: 8, reqTxt: 'reach wave 8' },
-  { id: 'gold', name: 'GOLDEN LEGEND', cap: '#C8A028', visor: '#8A6A10', reqKills: 1000, reqWave: 0, reqTxt: '1000 lifetime kills' },
+  { id: 'classic', name: 'CLASSIC', cap: '#3A2313', visor: '#241206', reqKills: 0, reqWave: 0, reqTxt: '', bonusTxt: 'no bonus — just style' },
+  { id: 'red', name: 'ROAD RASH', cap: '#8B1A1A', visor: '#4A0A0A', reqKills: 250, reqWave: 0, reqTxt: '250 lifetime kills', bonusTxt: '+10% damage', dmg: 0.10 },
+  { id: 'blue', name: 'BLUE RIDGE', cap: '#1B4A8B', visor: '#0A2448', reqKills: 0, reqWave: 8, reqTxt: 'reach wave 8', bonusTxt: '+15 max HP', hp: 15 },
+  { id: 'gold', name: 'GOLDEN LEGEND', cap: '#C8A028', visor: '#8A6A10', reqKills: 1000, reqWave: 0, reqTxt: '1000 lifetime kills', bonusTxt: '+1 tooth per kill', teeth: 1 },
+  { id: 'chrome', name: 'CHROME DOME', cap: '#B8C4CC', visor: '#78848C', reqKills: 0, reqWave: 15, reqTxt: 'reach wave 15', bonusTxt: '+10% move speed', spd: 0.10 },
+  { id: 'midnight', name: 'MIDNIGHT RIDER', cap: '#14141C', visor: '#000000', reqKills: 2500, reqWave: 0, reqTxt: '2500 lifetime kills', bonusTxt: '+15% dmg · +5% speed', dmg: 0.15, spd: 0.05 },
 ];
 export function hatUnlocked(h: Hat, stats: LifetimeStats) {
   return stats.kills >= h.reqKills && stats.bestWave >= h.reqWave;
@@ -115,6 +124,13 @@ export interface RunSnapshot {
   upgDmg: number;
   upgMic: number;
   streak: number;
+  // Optional fields added later — old snapshots may omit them
+  rangeMult?: number;
+  teethBonus?: number;
+  streakSave?: boolean;
+  maxStreak?: number;
+  runnerKills?: number;
+  noHitWaves?: number;
 }
 export async function saveRun(s: RunSnapshot) {
   try { await AsyncStorage.setItem(K_RUN, JSON.stringify(s)); } catch {}
@@ -150,6 +166,53 @@ export const DAILY_MODS = [
 export function todayMod() {
   return DAILY_MODS[dailySeed() % DAILY_MODS.length];
 }
+// ── Daily login streak ────────────────────────────────────────────────────────
+// Completing a daily run on consecutive days earns escalating teeth bonuses.
+const K_DSTREAK = 'zb_dstreak';
+const STREAK_BONUS = [10, 20, 50, 75, 100, 150, 200]; // day 1..7+
+export interface DailyStreak { last: string; count: number }
+export async function loadDailyStreak(): Promise<DailyStreak> {
+  try {
+    const s = JSON.parse((await AsyncStorage.getItem(K_DSTREAK)) ?? 'null');
+    return s && typeof s.count === 'number' ? s : { last: '', count: 0 };
+  } catch { return { last: '', count: 0 }; }
+}
+function yesterdayKey(): string {
+  const d = new Date(Date.now() - 86400000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+/** Call when a daily run ends. Awards the streak bonus once per day. */
+export async function recordDailyStreak(): Promise<{ count: number; bonus: number }> {
+  try {
+    const s = await loadDailyStreak();
+    const today = todayKey();
+    if (s.last === today) return { count: s.count, bonus: 0 }; // already counted today
+    const count = s.last === yesterdayKey() ? s.count + 1 : 1;
+    const bonus = STREAK_BONUS[Math.min(count, STREAK_BONUS.length) - 1];
+    await AsyncStorage.setItem(K_DSTREAK, JSON.stringify({ last: today, count }));
+    await addTeeth(bonus);
+    return { count, bonus };
+  } catch { return { count: 0, bonus: 0 }; }
+}
+/** Current streak for display: counts only if played today or yesterday. */
+export function streakAlive(s: DailyStreak): number {
+  return s.last === todayKey() || s.last === yesterdayKey() ? s.count : 0;
+}
+
+// ── Endless mode best score ───────────────────────────────────────────────────
+export const ENDLESS_UNLOCK_WAVE = 10;
+const K_ENDLESS = 'zb_endless_hs';
+export async function loadEndlessBest(): Promise<number> {
+  try { return parseInt((await AsyncStorage.getItem(K_ENDLESS)) ?? '0') || 0; } catch { return 0; }
+}
+export async function saveEndlessBest(score: number): Promise<boolean> {
+  try {
+    const prev = await loadEndlessBest();
+    if (score > prev) { await AsyncStorage.setItem(K_ENDLESS, String(score)); return true; }
+    return false;
+  } catch { return false; }
+}
+
 export async function loadDailyBest(): Promise<number> {
   try { return parseInt((await AsyncStorage.getItem(K_DAILY + todayKey())) ?? '0') || 0; } catch { return 0; }
 }

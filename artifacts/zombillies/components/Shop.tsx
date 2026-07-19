@@ -108,6 +108,7 @@ export default function Shop({ onClose, onPurchased, onHatChange }: Props) {
                   </View>
                   <Text style={s.hatName}>{h.name}</Text>
                   <Text style={s.hatReq}>{unlocked ? (active ? 'WEARING' : 'TAP TO WEAR') : `🔒 ${h.reqTxt}`}</Text>
+                  <Text style={s.hatBonus}>{h.bonusTxt}</Text>
                 </Pressable>
               );
             })}
@@ -159,6 +160,7 @@ const s = StyleSheet.create({
   },
   hatSwatchBrim: { width: 22, height: 4, borderRadius: 2, marginLeft: -8, marginBottom: -3 },
   hatName: { color: '#FFF', fontSize: 10, fontWeight: '900', letterSpacing: 1 },
+  hatBonus: { color: '#7FD44A', fontSize: 8, fontWeight: '700', marginTop: 1, textAlign: 'center' },
   hatReq: { color: 'rgba(255,255,255,0.4)', fontSize: 8.5, fontWeight: '600', marginTop: 2, textAlign: 'center' },
   foot: { color: 'rgba(255,255,255,0.35)', fontSize: 9.5, marginTop: 14, textAlign: 'center' },
 });

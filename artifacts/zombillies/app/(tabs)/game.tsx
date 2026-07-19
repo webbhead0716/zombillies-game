@@ -13,7 +13,9 @@ import {
   loadUpgrades, loadStats, loadHat, addTeeth, recordRun, saveDailyBest,
   todayMod, dailySeed, HATS,
   saveRun, loadRun, clearRun, type Upgrades,
+  recordDailyStreak, saveEndlessBest,
 } from '../../lib/progress';
+import { addQuestProgress, checkAchievements } from '../../lib/meta';
 import Shop from '../../components/Shop';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
@@ -140,12 +142,22 @@ const ENEMY_ATK_RANGE = 44;
 const ENEMY_DMG = 12;
 const ENEMY_ATK_CD = 1600;
 
-// Zombie variety — 0: shambler (baseline), 1: tank (slow, beefy), 2: runner (fast, frail)
+// Zombie variety — 0: shambler, 1: tank, 2: runner, 3: spitter (ranged), 4: exploder
 const ETYPE_STATS = [
   { spd: 2.0, hp: 80, dmg: 12, scale: 1 },
   { spd: 1.25, hp: 160, dmg: 20, scale: 1.16 },
   { spd: 3.1, hp: 45, dmg: 8, scale: 0.92 },
+  { spd: 1.6, hp: 60, dmg: 10, scale: 0.98 },   // spitter: stops and lobs bile
+  { spd: 2.7, hp: 35, dmg: 18, scale: 0.88 },   // exploder: detonates on death/contact
 ] as const;
+const SPITTER_UNLOCK_WAVE = 4;
+const EXPLODER_UNLOCK_WAVE = 6;
+const SPIT_RANGE = 250;       // spitter stops here and shoots
+const SPIT_CD = 2400;
+const SPIT_SPD = 5.2;
+const SPIT_LIFETIME = 1600;
+const EXPLODE_RADIUS = 90;
+const EXPLODE_DMG = 18;
 // Zombies get slightly stronger every wave
 const waveHpMult = (w: number) => 1 + (w - 1) * 0.06;
 const waveSpdBoost = (w: number) => Math.min((w - 1) * 0.05, 1.0);
@@ -170,6 +182,9 @@ const PERKS = [
   { id: 'maxhp', name: 'THICK SKIN', desc: '+20 max HP', icon: 'shield' as const },
   { id: 'dmg', name: 'ANGRY DISCS', desc: '+15% damage', icon: 'flash' as const },
   { id: 'spd', name: 'GREASED BOOTS', desc: '+8% move speed', icon: 'walk' as const },
+  { id: 'range', name: 'LONG ARM', desc: '+15% throw range', icon: 'resize' as const },
+  { id: 'lucky', name: 'TOOTH FAIRY', desc: '+1 tooth per kill', icon: 'star' as const },
+  { id: 'showman', name: 'SHOWMAN', desc: 'Hits halve your streak instead of resetting it', icon: 'mic' as const },
 ];
 
 // Scoring / waves
@@ -250,7 +265,7 @@ function genRoundSolids(wave: number, roundStart: number): Solid[] {
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Enemy {
   id: string;
-  etype: 0 | 1 | 2;
+  etype: 0 | 1 | 2 | 3 | 4;
   wx: number;
   hp: number;
   maxHp: number;
@@ -259,10 +274,21 @@ interface Enemy {
   fade: number;
   step: number;
   boss: boolean;
-  charger: boolean; // boss variant: bursts of speed
+  charger: boolean;  // boss variant: bursts of speed
+  summoner: boolean; // boss variant: raises walkers mid-fight
+  summonCd: number;
+  spitCd: number;    // spitter shot cooldown
+  exploded: boolean; // exploder already detonated (no double boom)
   spd: number;
   dmg: number;
   scale: number;
+}
+
+interface SpitGlob {
+  id: string;
+  wx: number;
+  dir: number;
+  t: number;
 }
 
 interface DVDProj {
@@ -303,6 +329,7 @@ interface GS {
   step: number;
   enemies: Enemy[];
   dvds: DVDProj[];
+  globs: SpitGlob[];   // spitter projectiles
   hitEffects: HitEffect[];
   powerups: Powerup[];
   activePowerup: 'ketchup' | 'chili' | null;
@@ -336,14 +363,25 @@ interface GS {
   // Run-scoped perk effects (picked between waves)
   dmgMult: number;
   spdMult: number;
+  rangeMult: number;    // throw range multiplier (LONG ARM perk)
+  teethBonus: number;   // extra teeth per kill (TOOTH FAIRY perk / gold hat)
+  streakSave: boolean;  // SHOWMAN perk: hits halve streak instead of resetting
   // Streak / currency / juice
   streak: number;       // kills since last hit taken
+  maxStreak: number;    // best streak this run (achievements)
   teeth: number;        // currency earned this run
   teethBanked: number;  // portion of `teeth` already persisted to storage
   killsBanked: number;  // portion of `kills` already recorded to lifetime stats
   bossBanked: number;   // portion of `bossKills` already recorded to lifetime stats
   bossKills: number;
   slowmoT: number;      // slow-motion timer after boss kills
+  // Quest / achievement tracking (banked with deltas like teeth/kills)
+  runnerKills: number;
+  runnerBanked: number;
+  noHitWaves: number;   // waves cleared without taking a hit this run
+  noHitBanked: number;
+  // Endless mode: no intermissions, auto-perks, separate best score
+  endless: boolean;
   // Daily challenge modifiers
   daily: boolean;
   forceRunners: boolean;
@@ -377,7 +415,7 @@ function mkGS(): GS {
     wx: 0, vy: 0, ay: 0, grounded: true, faceR: true,
     hp: PLAYER_MAX_HP,
     atkActive: false, atkT: 0, iframeT: 0, dmgFlash: 0, step: 0,
-    enemies: [], dvds: [], hitEffects: [],
+    enemies: [], dvds: [], globs: [], hitEffects: [],
     powerups: [], activePowerup: null,
     micT: 0, puCount: 0,
     powerupSpawnT: POWERUP_FIRST_SPAWN,
@@ -392,32 +430,82 @@ function mkGS(): GS {
     solids: genRoundSolids(1, 0),
     throwCount: 0, shakeT: 0, hintT: 7500, roundTotal: 8,
     maxHp: PLAYER_MAX_HP, upgDmg: 0, upgMic: 0,
-    dmgMult: 1, spdMult: 1,
-    streak: 0, teeth: 0, teethBanked: 0, killsBanked: 0, bossBanked: 0, bossKills: 0, slowmoT: 0,
+    dmgMult: 1, spdMult: 1, rangeMult: 1, teethBonus: 0, streakSave: false,
+    streak: 0, maxStreak: 0, teeth: 0, teethBanked: 0, killsBanked: 0, bossBanked: 0, bossKills: 0, slowmoT: 0,
+    runnerKills: 0, runnerBanked: 0, noHitWaves: 0, noHitBanked: 0,
+    endless: false,
     daily: false, forceRunners: false, hpMult: 1, noCheckpoints: false, seedOffset: 0,
     waveMsg: 2500,
   };
 }
 
-function spawnEnemy(g: GS, boss = false) {
+function spawnEnemy(g: GS, boss = false, forceType?: 0 | 1 | 2 | 3 | 4, nearWx?: number) {
   const side = g.nextId % 2 === 0 ? 1 : -1;
   g.nextId++;
   const jitter = (g.nextId % 5) * 40;
-  const etype = (g.forceRunners ? 2 : g.nextId % 3) as 0 | 1 | 2;
-  // Boss variety: bosses alternate between the brute and the charger
-  const charger = boss && Math.floor(g.wave / 3) % 2 === 0;
+  // Mix: base 3 types, spitters join at wave 4+, exploders at wave 6+
+  let etype: 0 | 1 | 2 | 3 | 4;
+  if (forceType !== undefined) etype = forceType;
+  else if (g.forceRunners) etype = 2;
+  else {
+    const poolSize = g.wave >= EXPLODER_UNLOCK_WAVE ? 5 : g.wave >= SPITTER_UNLOCK_WAVE ? 4 : 3;
+    etype = (g.nextId % poolSize) as 0 | 1 | 2 | 3 | 4;
+  }
+  // Boss variety rotates each boss wave: brute → charger → summoner
+  const bossKind = boss ? Math.floor(g.wave / 3) % 3 : -1;
+  const charger = bossKind === 1;
+  const summoner = bossKind === 2;
   const stats = ETYPE_STATS[etype];
   const hp = boss
-    ? Math.round((BOSS_HP_BASE + g.wave * BOSS_HP_PER_WAVE) * (charger ? 0.7 : 1))
+    ? Math.round((BOSS_HP_BASE + g.wave * BOSS_HP_PER_WAVE) * (charger ? 0.7 : summoner ? 0.85 : 1))
     : Math.round(stats.hp * waveHpMult(g.wave) * g.hpMult);
   g.enemies.push({
     id: `e${g.nextId}`, etype,
-    wx: g.wx + side * (SPAWN_DIST + jitter),
+    wx: nearWx !== undefined ? nearWx : g.wx + side * (SPAWN_DIST + jitter),
     hp, maxHp: hp,
-    atkCd: 600, dead: false, fade: 1, step: 0, boss, charger,
+    atkCd: 600, dead: false, fade: 1, step: 0, boss, charger, summoner,
+    summonCd: 4000, spitCd: 1200, exploded: false,
     spd: boss ? BOSS_SPD : stats.spd + waveSpdBoost(g.wave),
     dmg: boss ? (charger ? 20 : BOSS_DMG) : stats.dmg,
     scale: boss ? (charger ? 1.45 : BOSS_SCALE) : stats.scale,
+  });
+}
+
+// Fire-and-forget haptic buzz — no-ops safely on web
+function buzz(style: Haptics.ImpactFeedbackStyle) {
+  try { Haptics.impactAsync(style).catch(() => {}); } catch {}
+}
+
+/** Apply a between-wave perk by id (also used by endless auto-perks). */
+function applyPerk(g: GS, id: string) {
+  if (id === 'heal') g.hp = Math.min(g.maxHp, g.hp + 35);
+  else if (id === 'maxhp') { g.maxHp += 20; g.hp += 20; }
+  else if (id === 'dmg') g.dmgMult *= 1.15;
+  else if (id === 'spd') g.spdMult *= 1.08;
+  else if (id === 'range') g.rangeMult *= 1.15;
+  else if (id === 'lucky') g.teethBonus += 1;
+  else if (id === 'showman') g.streakSave = true;
+}
+
+/**
+ * Bank quest progress + check achievements. Runner/no-hit deltas are computed
+ * and marked banked here; kill/boss/teeth deltas are passed in by the caller
+ * (they share banking with lifetime stats). Returns newly unlocked badges.
+ */
+async function bankQuestAch(g: GS, killDelta: number, bossDelta: number, teethDelta: number) {
+  const runnerDelta = g.runnerKills - g.runnerBanked;
+  g.runnerBanked = g.runnerKills;
+  const nohitDelta = g.noHitWaves - g.noHitBanked;
+  g.noHitBanked = g.noHitWaves;
+  await addQuestProgress({
+    kills: killDelta, boss: bossDelta, teeth: teethDelta,
+    runners: runnerDelta, nohit: nohitDelta, wave: g.wave,
+  });
+  const s = await loadStats();
+  return checkAchievements({
+    runKills: g.kills, runTeeth: g.teeth, maxStreak: g.maxStreak,
+    noHitWaves: g.noHitWaves, wave: g.wave,
+    lifetimeKills: s.kills, lifetimeBosses: s.bosses,
   });
 }
 
@@ -425,18 +513,45 @@ function spawnEnemy(g: GS, boss = false) {
 function registerKill(g: GS, e: Enemy) {
   g.score += Math.round((e.boss ? BOSS_SCORE : SCORE_PER_KILL) * streakMult(g.streak));
   g.kills++; g.roundKills++;
+  if (!e.boss && e.etype === 2) g.runnerKills++;
   g.streak++;
+  if (g.streak > g.maxStreak) g.maxStreak = g.streak;
   const callout = STREAK_CALLOUTS[g.streak];
   if (callout) g.hitEffects.push({ id: `h${++g.nextId}`, wx: g.wx, t: 0, text: callout });
   if (e.boss) {
-    g.teeth += TEETH_PER_BOSS;
+    g.teeth += TEETH_PER_BOSS + g.teethBonus;
     g.bossKills++;
     g.slowmoT = 900;  // savor the moment
     g.shakeT = 420;
     g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: `+${TEETH_PER_BOSS} 🦷` });
+    buzz(Haptics.ImpactFeedbackStyle.Heavy);
   } else {
-    g.teeth += TEETH_PER_KILL;
+    g.teeth += TEETH_PER_KILL + g.teethBonus;
+    buzz(Haptics.ImpactFeedbackStyle.Light);
   }
+  // Exploders detonate on death — dodge the blast!
+  if (!e.boss && e.etype === 4 && !e.exploded) {
+    e.exploded = true;
+    g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: 'BOOM!' });
+    g.shakeT = Math.max(g.shakeT, 260);
+    if (Math.abs(e.wx - g.wx) < EXPLODE_RADIUS && g.iframeT <= 0 && g.micT <= 0) {
+      damagePlayer(g, EXPLODE_DMG, false);
+    }
+  }
+}
+
+/** Shared player-damage bookkeeping (enemy hits, spit globs, explosions). */
+function damagePlayer(g: GS, dmg: number, fromBoss: boolean) {
+  g.hp -= dmg;
+  g.hitsTaken++; g.roundHits++;
+  g.streak = g.streakSave ? Math.floor(g.streak / 2) : 0;
+  g.iframeT = IFRAME_DUR;
+  g.dmgFlash = 280;
+  if (fromBoss) g.shakeT = 340;
+  g.activePowerup = null; // losing the power-up is the price of getting hit
+  buzz(Haptics.ImpactFeedbackStyle.Medium);
+  if (g.hp <= 0) { g.hp = 0; g.phase = 'dead'; playSfx('gameover'); return; }
+  playSfx('hurt');
 }
 
 function gameTick(g: GS, holdL: boolean, holdR: boolean) {
@@ -560,6 +675,25 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
   g.dvds = g.dvds.filter(d => d.t < DVD_LIFETIME);
   for (const d of g.dvds) { d.wx += d.dir * 8; d.t += TICK_MS; }
 
+  // Spit globs — spitter projectiles fly flat and burst on Bill
+  const keepGlobs: SpitGlob[] = [];
+  for (const gl of g.globs) {
+    gl.wx += gl.dir * SPIT_SPD;
+    gl.t += TICK_MS;
+    if (gl.t >= SPIT_LIFETIME) continue;
+    if (Math.abs(gl.wx - g.wx) < 22 && g.ay < 34) {
+      // Hit Bill (jumping over globs dodges them)
+      if (g.iframeT <= 0 && g.micT <= 0) {
+        g.hitEffects.push({ id: `h${++g.nextId}`, wx: g.wx, t: 0, text: 'SPLAT!' });
+        damagePlayer(g, ETYPE_STATS[3].dmg, false);
+        if (g.phase !== 'playing') return;
+      }
+      continue;
+    }
+    keepGlobs.push(gl);
+  }
+  g.globs = keepGlobs;
+
   // Hit effects
   g.hitEffects = g.hitEffects.filter(h => h.t < 750);
   for (const h of g.hitEffects) h.t += TICK_MS;
@@ -576,7 +710,28 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     let eSpd = e.spd;
     if (e.boss && e.charger) eSpd = e.step % 3400 < 1000 ? e.spd * 2.6 : e.spd * 0.75;
     const eReach = e.boss ? ENEMY_ATK_RANGE + 16 : ENEMY_ATK_RANGE;
-    if (dist > eReach - 4) { e.wx += dir * eSpd; e.step += TICK_MS; }
+    // Spitters keep their distance and lob bile instead of closing in
+    const isSpitter = !e.boss && e.etype === 3;
+    if (isSpitter) {
+      if (dist > SPIT_RANGE) { e.wx += dir * eSpd; e.step += TICK_MS; }
+      e.spitCd -= TICK_MS;
+      if (dist <= SPIT_RANGE + 60 && e.spitCd <= 0) {
+        e.spitCd = SPIT_CD;
+        g.globs.push({ id: `gl${++g.nextId}`, wx: e.wx + dir * 14, dir, t: 0 });
+        playSfx('throw');
+      }
+    } else if (dist > eReach - 4) { e.wx += dir * eSpd; e.step += TICK_MS; }
+
+    // Summoner boss raises extra walkers mid-fight
+    if (e.boss && e.summoner) {
+      e.summonCd -= TICK_MS;
+      const minions = g.enemies.filter(x => !x.dead && !x.boss).length;
+      if (e.summonCd <= 0 && minions < 5) {
+        e.summonCd = 5200;
+        spawnEnemy(g, false, 0, e.wx + (e.wx > g.wx ? 60 : -60));
+        g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: 'RISE!' });
+      }
+    }
 
     // Mic mode: any regular zombie that touches Bill gets fried instantly.
     // Bosses are immune to the touch-kill — they must be damaged with weapons.
@@ -590,17 +745,17 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
     }
 
     if (e.atkCd > 0) e.atkCd -= TICK_MS;
-    if (dist < eReach && e.atkCd <= 0 && g.iframeT <= 0 && g.micT <= 0) {
-      g.hp -= e.dmg;
-      g.hitsTaken++; g.roundHits++;
-      g.streak = 0; // getting hit resets the score multiplier
-      g.iframeT = IFRAME_DUR;
-      g.dmgFlash = 280;
-      if (e.boss) g.shakeT = 340; // boss hits rattle the screen
+    if (!isSpitter && dist < eReach && e.atkCd <= 0 && g.iframeT <= 0 && g.micT <= 0) {
       e.atkCd = ENEMY_ATK_CD;
-      g.activePowerup = null; // losing the power-up is the price of getting hit
-      if (g.hp <= 0) { g.hp = 0; g.phase = 'dead'; playSfx('gameover'); return; }
-      playSfx('hurt');
+      // Exploders self-destruct on contact instead of clawing
+      if (!e.boss && e.etype === 4 && !e.exploded) {
+        e.exploded = true;
+        e.dead = true; e.fade = 1;
+        g.hitEffects.push({ id: `h${++g.nextId}`, wx: e.wx, t: 0, text: 'BOOM!' });
+        g.shakeT = Math.max(g.shakeT, 260);
+      }
+      damagePlayer(g, e.dmg, e.boss);
+      if (g.phase !== 'playing') return;
     }
     keepE.push(e);
   }
@@ -617,6 +772,8 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
       g.score += WAVE_BONUS;
       g.phase = 'intermission';
       playSfx('powerup');
+      // Flawless wave? Counts toward bounties & achievements
+      if (g.roundHits === 0) g.noHitWaves++;
       // Bank teeth + autosave the run at every wave clear.
       // The snapshot is ALWAYS this pre-perk intermission state — it is the
       // single canonical resume point (SAVE & QUIT never writes its own).
@@ -629,17 +786,31 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
       g.killsBanked = g.kills;
       g.bossBanked = g.bossKills;
       const reachedWave = g.wave + 1; // clearing wave N means you've reached N+1
-      const snap = g.daily ? null : {
+      const snap = (g.daily || g.endless) ? null : {
         wave: g.wave, hp: g.hp, maxHp: g.maxHp, score: g.score,
         kills: g.kills, hits: g.hitsTaken, bossKills: g.bossKills,
         teeth: g.teeth, dmgMult: g.dmgMult, spdMult: g.spdMult,
         upgDmg: g.upgDmg, upgMic: g.upgMic, streak: g.streak,
+        rangeMult: g.rangeMult, teethBonus: g.teethBonus, streakSave: g.streakSave,
+        maxStreak: g.maxStreak, runnerKills: g.runnerKills, noHitWaves: g.noHitWaves,
       };
       (async () => {
         if (unbanked > 0) await addTeeth(unbanked);
         await recordRun(killDelta, bossDelta, reachedWave);
         if (snap) await saveRun(snap);
+        const fresh = await bankQuestAch(g, killDelta, bossDelta, unbanked);
+        for (const a of fresh) {
+          g.hitEffects.push({ id: `h${++g.nextId}`, wx: g.wx, t: 0, text: `🏅 ${a.name}!` });
+        }
       })();
+      // Endless mode: no intermission — grab a random perk and keep rolling
+      if (g.endless) {
+        const r = mkRng(g.wave * 131 + 77);
+        const p = PERKS[Math.floor(r() * PERKS.length)];
+        applyPerk(g, p.id);
+        g.hitEffects.push({ id: `h${++g.nextId}`, wx: g.wx, t: 0, text: `⚡ ${p.name}!` });
+        startNextWave(g);
+      }
     }
   }
 }
@@ -667,7 +838,8 @@ function startNextWave(g: GS) {
   g.spawnT = 800;
   g.waveMsg = 2500;
   g.dvds = [];
-  g.hitEffects = [];
+  g.globs = [];
+  g.hitEffects = g.endless ? g.hitEffects : [];
   g.phase = 'playing';
 }
 
@@ -690,7 +862,7 @@ function doAttack(g: GS) {
   // Vinyl records: unlocked at wave 5, every 3rd throw — longer range, harder hit
   g.throwCount++;
   const vinyl = !isKetchup && g.wave >= VINYL_UNLOCK_WAVE && g.throwCount % VINYL_EVERY === 0;
-  const range = isKetchup ? KETCHUP_RANGE : vinyl ? VINYL_RANGE : ATTACK_RANGE;
+  const range = (isKetchup ? KETCHUP_RANGE : vinyl ? VINYL_RANGE : ATTACK_RANGE) * g.rangeMult;
   const dmg = Math.round(
     (dvdDmgForWave(g.wave) + g.upgDmg) * g.dmgMult *
     (isChili ? CHILI_DMG_MULT : 1) * (vinyl ? VINYL_DMG_MULT : 1)
@@ -788,6 +960,8 @@ const ENEMY_COLS = [
   { body: C.zombie0Body, head: C.zombie0Head, shirt: '#3A4C30', pants: '#2E2A26' },
   { body: C.zombie1Body, head: C.zombie1Head, shirt: '#443830', pants: '#3A4A5A' },
   { body: C.zombie2Body, head: C.zombie2Head, shirt: '#2A3820', pants: '#2A2018' },
+  { body: '#5A7A2A', head: '#9AC24A', shirt: '#3E5A1A', pants: '#2E3A14' },   // spitter: sickly bright green
+  { body: '#8A3A14', head: '#C46A2A', shirt: '#6A2408', pants: '#3A1404' },   // exploder: volatile orange
 ] as const;
 
 // Ruined city silhouette (far parallax layer, like the comic backdrops)
@@ -923,6 +1097,9 @@ export default function GameScreen() {
   // Load persistent progression + apply daily-challenge modifiers once at mount
   useEffect(() => {
     const gg = gsRef.current;
+    if (routeParams.mode === 'endless') {
+      gg.endless = true;
+    }
     if (routeParams.mode === 'daily') {
       const mod = todayMod();
       gg.daily = true;
@@ -955,20 +1132,33 @@ export default function GameScreen() {
         g2.upgDmg = snap.upgDmg;
         g2.upgMic = snap.upgMic;
         g2.streak = snap.streak;
+        g2.rangeMult = snap.rangeMult ?? 1;
+        g2.teethBonus = snap.teethBonus ?? 0;
+        g2.streakSave = snap.streakSave ?? false;
+        g2.maxStreak = snap.maxStreak ?? snap.streak;
+        g2.runnerKills = snap.runnerKills ?? 0;
+        g2.runnerBanked = g2.runnerKills; // quest progress already banked at save
+        g2.noHitWaves = snap.noHitWaves ?? 0;
+        g2.noHitBanked = g2.noHitWaves;
         g2.spawnQ = 0; g2.spawnMarks = []; g2.cpBurst = 0;
         g2.enemies = [];
         g2.hintT = 0;
         g2.phase = 'intermission';
       });
     } else {
-      loadUpgrades().then(u => {
+      Promise.all([loadUpgrades(), loadHat()]).then(([u, hid]) => {
         const g2 = gsRef.current;
         // Only apply if the run is still fresh — never buff/heal mid-run
         if (g2.wave !== 1 || g2.kills > 0 || g2.hitsTaken > 0 || g2.phase === 'dead') return;
-        g2.maxHp = PLAYER_MAX_HP + u.hp * 10;
+        // Equipped hat grants a small run bonus
+        const h = HATS.find(x => x.id === hid) ?? HATS[0];
+        g2.maxHp = PLAYER_MAX_HP + u.hp * 10 + (h.hp ?? 0);
         g2.hp = g2.maxHp;
         g2.upgDmg = u.dmg * 4;
         g2.upgMic = u.mic * 3000;
+        g2.dmgMult *= 1 + (h.dmg ?? 0);
+        g2.spdMult *= 1 + (h.spd ?? 0);
+        g2.teethBonus += h.teeth ?? 0;
       });
     }
     loadStats().then(s => setBestWave(s.bestWave));
@@ -1006,31 +1196,66 @@ export default function GameScreen() {
   useEffect(() => {
     if (!isDead) return;
     const g = gsRef.current;
-    AsyncStorage.getItem(HS_KEY).then(val => {
-      const prev = val ? parseInt(val) : 0;
-      const isNew = g.score > prev;
-      const hs = isNew ? g.score : prev;
-      if (isNew) AsyncStorage.setItem(HS_KEY, String(g.score));
-      router.replace({
-        pathname: '/(tabs)/gameover',
-        params: {
-          score: String(g.score), wave: String(g.wave), hs: String(hs), newHs: isNew ? '1' : '0',
-          kills: String(g.kills), hits: String(g.hitsTaken),
-          bosses: String(g.bossKills), teeth: String(g.teeth),
-          daily: g.daily ? '1' : '0',
-        },
-      });
-    });
     // Persist run progression exactly once, even if this effect re-fires.
     // Ordered writes: bank + record first, clear the save slot last, so a
     // crash mid-sequence can never leave rewards unbanked.
     if (!persistedRef.current) {
       persistedRef.current = true;
       (async () => {
-        await addTeeth(g.teeth - g.teethBanked); // only what wasn't banked at wave clears
-        await recordRun(g.kills - g.killsBanked, g.bossKills - g.bossBanked, g.wave);
-        if (g.daily) await saveDailyBest(g.score);
-        await clearRun(); // the run is over — no continuing a dead run
+        // Best-effort persistence: any storage failure must never strand the
+        // player on a dead game screen — navigation happens in finally.
+        let isNew = false;
+        let hs = g.score;
+        let streakCount = 0, streakBonus = 0;
+        let achNames = '';
+        try {
+          // High score — endless mode keeps its own leaderboard
+          if (g.endless) {
+            isNew = await saveEndlessBest(g.score);
+            if (!isNew) {
+              const val = await AsyncStorage.getItem('zb_endless_hs');
+              hs = val ? parseInt(val) : g.score;
+            }
+          } else {
+            const val = await AsyncStorage.getItem(HS_KEY);
+            const prev = val ? parseInt(val) : 0;
+            isNew = g.score > prev;
+            hs = isNew ? g.score : prev;
+            if (isNew) await AsyncStorage.setItem(HS_KEY, String(g.score));
+          }
+          const teethDelta = g.teeth - g.teethBanked;
+          const killDelta = g.kills - g.killsBanked;
+          const bossDelta = g.bossKills - g.bossBanked;
+          await addTeeth(teethDelta); // only what wasn't banked at wave clears
+          await recordRun(killDelta, bossDelta, g.wave);
+          if (g.daily) await saveDailyBest(g.score);
+          // Daily login streak — completing a daily run keeps the fire lit
+          if (g.daily) {
+            const sres = await recordDailyStreak();
+            streakCount = sres.count;
+            streakBonus = sres.bonus;
+          }
+          // Bounty progress + achievement unlocks
+          const fresh = await bankQuestAch(g, killDelta, bossDelta, teethDelta);
+          achNames = fresh.map(a => a.name).join('|');
+          await clearRun(); // the run is over — no continuing a dead run
+        } catch {
+          // Swallow storage errors — rewards may be partially banked, but the
+          // game must move on. Delta markers keep re-banking safe next run.
+        } finally {
+          router.replace({
+            pathname: '/(tabs)/gameover',
+            params: {
+              score: String(g.score), wave: String(g.wave), hs: String(hs), newHs: isNew ? '1' : '0',
+              kills: String(g.kills), hits: String(g.hitsTaken),
+              bosses: String(g.bossKills), teeth: String(g.teeth),
+              daily: g.daily ? '1' : '0',
+              endless: g.endless ? '1' : '0',
+              streak: String(streakCount), streakBonus: String(streakBonus),
+              ach: achNames,
+            },
+          });
+        }
       })();
     }
   }, [isDead]);
@@ -1431,6 +1656,8 @@ export default function GameScreen() {
         const ec = e.boss
           ? e.charger
             ? { body: '#6E1414', head: '#8A6A2E', shirt: '#4A0E0E', pants: '#2A0A0A' }
+            : e.summoner
+            ? { body: '#2A1A4A', head: '#7A5AB4', shirt: '#1A0E34', pants: '#140A24' }
             : { body: C.bossBody, head: C.bossHead, shirt: '#3A1420', pants: '#241018' }
           : ENEMY_COLS[e.etype];
 
@@ -1446,7 +1673,7 @@ export default function GameScreen() {
                     textShadowColor: '#000', textShadowRadius: 3,
                     textShadowOffset: { width: 0, height: 1 },
                   }}>
-                    {e.charger ? 'CHARGER' : 'BOSS'}
+                    {e.charger ? 'CHARGER' : e.summoner ? 'SUMMONER' : 'BOSS'}
                   </Text>
                 )}
                 <View style={[st.eHpBg, { left: ebx - 3, top: eHdY - 12, width: eW + 6, height: e.boss ? 7 : 5 }]}>
@@ -1540,6 +1767,20 @@ export default function GameScreen() {
               }} />
             )}
           </View>
+        );
+      })}
+
+      {/* ── Spit globs (spitter bile) ── */}
+      {g.globs.map(gl => {
+        const sx = SW / 2 + (gl.wx - g.wx);
+        if (sx < -30 || sx > SW + 30) return null;
+        const wob = Math.sin(gl.t / 90) * 3;
+        return (
+          <View key={gl.id} pointerEvents="none" style={{
+            position: 'absolute', left: sx - 6, top: groundY - 26 + wob,
+            width: 12, height: 10, borderRadius: 6,
+            backgroundColor: '#8FD42A', borderWidth: 1.5, borderColor: '#5A8A14',
+          }} />
         );
       })}
 
@@ -1870,6 +2111,13 @@ export default function GameScreen() {
         </View>
       )}
 
+      {/* Endless mode tag */}
+      {g.endless && g.phase === 'playing' && (
+        <View style={[st.dailyTag, { top: topOff + HUD_H + 8 }]} pointerEvents="none">
+          <Text style={[st.dailyTagTxt, { color: '#FF8A3C' }]}>♾️ ENDLESS</Text>
+        </View>
+      )}
+
       {/* First-run tutorial hint */}
       {g.wave === 1 && g.hintT > 0 && g.waveMsg <= 200 && (
         <View style={[st.hintBox, { top: topOff + HUD_H + 30, opacity: Math.min(1, g.hintT / 800) }]} pointerEvents="none">
@@ -1933,6 +2181,8 @@ export default function GameScreen() {
                   gg.bossBanked = gg.bossKills;
                   await recordRun(kd, bd, gg.wave);
                 }
+                // Bounty progress earned mid-wave counts too
+                await bankQuestAch(gg, kd, bd, unbanked > 0 ? unbanked : 0);
                 router.replace('/(tabs)');
               }}
             >
@@ -1994,10 +2244,7 @@ export default function GameScreen() {
                   onPress={() => {
                     const gg = gsRef.current;
                     if (gg.phase !== 'intermission') return;
-                    if (p.id === 'heal') gg.hp = Math.min(gg.maxHp, gg.hp + 35);
-                    else if (p.id === 'maxhp') { gg.maxHp += 20; gg.hp += 20; }
-                    else if (p.id === 'dmg') gg.dmgMult *= 1.15;
-                    else if (p.id === 'spd') gg.spdMult *= 1.08;
+                    applyPerk(gg, p.id);
                     startNextWave(gg);
                     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
                   }}
