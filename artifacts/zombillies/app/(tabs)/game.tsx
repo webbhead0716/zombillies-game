@@ -340,6 +340,8 @@ interface GS {
   streak: number;       // kills since last hit taken
   teeth: number;        // currency earned this run
   teethBanked: number;  // portion of `teeth` already persisted to storage
+  killsBanked: number;  // portion of `kills` already recorded to lifetime stats
+  bossBanked: number;   // portion of `bossKills` already recorded to lifetime stats
   bossKills: number;
   slowmoT: number;      // slow-motion timer after boss kills
   // Daily challenge modifiers
@@ -391,7 +393,7 @@ function mkGS(): GS {
     throwCount: 0, shakeT: 0, hintT: 7500, roundTotal: 8,
     maxHp: PLAYER_MAX_HP, upgDmg: 0, upgMic: 0,
     dmgMult: 1, spdMult: 1,
-    streak: 0, teeth: 0, teethBanked: 0, bossKills: 0, slowmoT: 0,
+    streak: 0, teeth: 0, teethBanked: 0, killsBanked: 0, bossBanked: 0, bossKills: 0, slowmoT: 0,
     daily: false, forceRunners: false, hpMult: 1, noCheckpoints: false, seedOffset: 0,
     waveMsg: 2500,
   };
@@ -620,6 +622,13 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
       // single canonical resume point (SAVE & QUIT never writes its own).
       const unbanked = g.teeth - g.teethBanked;
       if (unbanked > 0) g.teethBanked = g.teeth;
+      // Bank lifetime stats too — kills/bosses/best-wave must not require
+      // dying to count. Deltas only, so nothing double-records.
+      const killDelta = g.kills - g.killsBanked;
+      const bossDelta = g.bossKills - g.bossBanked;
+      g.killsBanked = g.kills;
+      g.bossBanked = g.bossKills;
+      const reachedWave = g.wave + 1; // clearing wave N means you've reached N+1
       const snap = g.daily ? null : {
         wave: g.wave, hp: g.hp, maxHp: g.maxHp, score: g.score,
         kills: g.kills, hits: g.hitsTaken, bossKills: g.bossKills,
@@ -628,6 +637,7 @@ function gameTick(g: GS, holdL: boolean, holdR: boolean) {
       };
       (async () => {
         if (unbanked > 0) await addTeeth(unbanked);
+        await recordRun(killDelta, bossDelta, reachedWave);
         if (snap) await saveRun(snap);
       })();
     }
@@ -938,6 +948,8 @@ export default function GameScreen() {
         g2.bossKills = snap.bossKills;
         g2.teeth = snap.teeth;
         g2.teethBanked = snap.teeth; // everything in the snapshot is already banked
+        g2.killsBanked = snap.kills; // stats were recorded at the wave clear that saved this
+        g2.bossBanked = snap.bossKills;
         g2.dmgMult = snap.dmgMult;
         g2.spdMult = snap.spdMult;
         g2.upgDmg = snap.upgDmg;
@@ -1016,7 +1028,7 @@ export default function GameScreen() {
       persistedRef.current = true;
       (async () => {
         await addTeeth(g.teeth - g.teethBanked); // only what wasn't banked at wave clears
-        await recordRun(g.kills, g.bossKills, g.wave);
+        await recordRun(g.kills - g.killsBanked, g.bossKills - g.bossBanked, g.wave);
         if (g.daily) await saveDailyBest(g.score);
         await clearRun(); // the run is over — no continuing a dead run
       })();
@@ -1912,6 +1924,14 @@ export default function GameScreen() {
                 if (unbanked > 0) {
                   gg.teethBanked = gg.teeth;
                   await addTeeth(unbanked);
+                }
+                // Bank lifetime stats earned mid-wave too
+                const kd = gg.kills - gg.killsBanked;
+                const bd = gg.bossKills - gg.bossBanked;
+                if (kd > 0 || bd > 0) {
+                  gg.killsBanked = gg.kills;
+                  gg.bossBanked = gg.bossKills;
+                  await recordRun(kd, bd, gg.wave);
                 }
                 router.replace('/(tabs)');
               }}
