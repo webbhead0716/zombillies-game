@@ -21,6 +21,6 @@ jobs:
           token: ${{ secrets.EXPO_TOKEN }}
           packager: pnpm
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
       - name: Build APK
         run: eas build -p android --profile preview --non-interactive
