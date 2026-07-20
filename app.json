@@ -3,6 +3,9 @@
     "name": "zombillies-game",
     "slug": "zombillies-game",
     "version": "1.0.0",
+    "android": {
+      "package": "com.webbhead.zombillies"
+    },
     "extra": {
       "eas": {
         "projectId": "bc53f4bf-6b2e-4746-ae66-8716d60422dc"
